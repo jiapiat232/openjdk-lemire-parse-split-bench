@@ -35,7 +35,9 @@ openjdk-lemire-parse-split-bench/
 │   ├── run_jmh_arm64.sh                        # Run JMH on macOS ARM64 (with pre-benchmark `top` CPU load check)
 │   └── build_and_run_riscv64_docker.sh         # Cross-compile & run on Docker + QEMU 10.2.1 RISC-V 64 (`rv64gc_zba_zbb_zbs`)
 ├── report/
-│   └── benchmark_report.html                   # Interactive standalone HTML benchmark visualization report
+│   ├── benchmark_report.html                   # Interactive standalone HTML benchmark visualization report
+│   └── jmh_raw_outputs.txt                     # Verbatim old-vs-new JMH terminal logs & ablation history
+├── ARM_TOPDOWN_AND_JMH_GUIDE.md                # Deep-dive guide: Arm Telemetry Solution (topdown-tool) vs Intel TMA + JMH integration
 └── DEVELOPMENT_AND_TEST_PLAN.md                # Full Clean Code architecture, math derivations, and test logs
 ```
 
