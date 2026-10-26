@@ -1,0 +1,864 @@
+diff --git a/src/java.base/share/classes/java/lang/String.java b/src/java.base/share/classes/java/lang/String.java
+index 6dccaff04b5..cdcf69b0bf7 100644
+--- a/src/java.base/share/classes/java/lang/String.java
++++ b/src/java.base/share/classes/java/lang/String.java
+@@ -53,6 +53,7 @@
+ import java.util.stream.Stream;
+ import java.util.stream.StreamSupport;
+ 
++import jdk.internal.misc.Unsafe;
+ import jdk.internal.util.ArraysSupport;
+ import jdk.internal.util.Preconditions;
+ import jdk.internal.vm.annotation.ForceInline;
+@@ -3804,19 +3805,321 @@ private String[] split(String regex, int limit, boolean withDelimiters) {
+                 : pattern.split(this, limit);
+     }
+ 
++    private static final int[] EMPTY_INT_ARRAY = new int[0];
++    private static final int SWAR_SPLIT_STRIDE = Long.BYTES;
++    private static final int SWAR_DENSE_SPAN_THRESHOLD = 24;
++    private static final long SWAR_BROADCAST_MUL = 0x0101_0101_0101_0101L;
++    private static final long SWAR_LOW_SEVEN_BITS_MASK = 0x7F7F_7F7F_7F7F_7F7FL;
++
++    @ForceInline
++    private static long readLittleEndianLong(byte[] bytes, int offset) {
++        Unsafe unsafe = Unsafe.getUnsafe();
++        long word = unsafe.getLongUnaligned(bytes, Unsafe.ARRAY_BYTE_BASE_OFFSET + (long) offset);
++        return unsafe.isBigEndian() ? Long.reverseBytes(word) : word;
++    }
++
++    @ForceInline
++    private static long findEqualBytesSwarMask(long word, long broadcastTarget) {
++        long xored = word ^ broadcastTarget;
++        long low7 = (xored & SWAR_LOW_SEVEN_BITS_MASK) + SWAR_LOW_SEVEN_BITS_MASK;
++        return ~(low7 | xored | SWAR_LOW_SEVEN_BITS_MASK);
++    }
++
++    @ForceInline
++    private static String newLatin1SubString(byte[] val, int start, int subLen) {
++        if (subLen == 0) {
++            return "";
++        }
++        byte[] copy = new byte[subLen];
++        System.arraycopy(val, start, copy, 0, subLen);
++        return new String(copy, LATIN1);
++    }
++
++    private static int[] allocateInitialMatchOffsets(int stringLen, int secondIdx, int maxDelimiters) {
++        int avgSpan = Math.max(secondIdx >>> 1, 4);
++        int estimated = Math.clamp((stringLen / avgSpan) + 8, 16, 512);
++        return new int[Math.min(estimated, maxDelimiters)];
++    }
++
++    private static int[] growMatchOffsets(int[] current, int minGrowth, int maxDelimiters) {
++        int oldCapacity = current.length;
++        int prefGrowth = Math.min(oldCapacity, maxDelimiters - oldCapacity);
++        int newCapacity = ArraysSupport.newLength(
++                oldCapacity, Math.min(minGrowth, maxDelimiters - oldCapacity), prefGrowth);
++        return Arrays.copyOf(current, newCapacity);
++    }
++
++    @ForceInline
++    private static int computeTrimmedResultSize(int[] matchOffsets, int delimCount, int len, int limit) {
++        int resultSize = delimCount + 1;
++        if (limit == 0 && matchOffsets[delimCount - 1] + 1 == len) {
++            resultSize--;
++            while (resultSize > 1 && matchOffsets[resultSize - 2] + 1 == matchOffsets[resultSize - 1]) {
++                resultSize--;
++            }
++            if (resultSize == 1 && matchOffsets[0] == 0) {
++                return 0;
++            }
++        }
++        return resultSize;
++    }
++
+     private String[] split(char ch, int limit, boolean withDelimiters) {
++        if (!withDelimiters) {
++            return isLatin1()
++                    ? splitLatin1WithoutDelimiters(ch, limit)
++                    : splitUtf16WithoutDelimiters(ch, limit);
++        }
++        return splitWithDelimiters(ch, limit);
++    }
++
++    @ForceInline
++    private String[] splitLatin1WithoutDelimiters(char ch, int limit) {
++        if (!StringLatin1.canEncode(ch) || limit == 1) {
++            return new String[] {this};
++        }
++        byte[] val = this.value;
++        int len = val.length;
++        if (len == 0) {
++            return new String[] {this};
++        }
++
++        int firstIdx = StringLatin1.indexOf(val, ch, 0, len);
++        if (firstIdx < 0) {
++            return new String[] {this};
++        }
++
++        int secondIdx = (limit == 2) ? -1 : StringLatin1.indexOf(val, ch, firstIdx + 1, len);
++        if (secondIdx < 0) {
++            if (limit == 0 && firstIdx + 1 == len) {
++                return firstIdx == 0
++                        ? new String[0]
++                        : new String[] {newLatin1SubString(val, 0, firstIdx)};
++            }
++            return new String[] {
++                    newLatin1SubString(val, 0, firstIdx),
++                    newLatin1SubString(val, firstIdx + 1, len - (firstIdx + 1))
++            };
++        }
++
++        return (secondIdx >>> 1) >= SWAR_DENSE_SPAN_THRESHOLD
++                ? splitLatin1SparseIntrinsic(val, ch, limit, firstIdx, secondIdx)
++                : splitLatin1DenseSwar(val, ch, limit, firstIdx, secondIdx);
++    }
++
++    private static String[] splitLatin1SparseIntrinsic(
++            byte[] val, char ch, int limit, int firstIdx, int secondIdx) {
++        int len = val.length;
++        int maxDelimiters = limit > 0 ? limit - 1 : Integer.MAX_VALUE;
++        int avgSpan = secondIdx >>> 1;
++        int estimatedSegments = Math.clamp((len / avgSpan) + 2, 8, 512);
++        if (limit > 0 && estimatedSegments > limit) {
++            estimatedSegments = limit;
++        }
++        String[] buf = new String[estimatedSegments];
++        buf[0] = newLatin1SubString(val, 0, firstIdx);
++        buf[1] = newLatin1SubString(val, firstIdx + 1, secondIdx - (firstIdx + 1));
++        int count = 2;
++        int off = secondIdx + 1;
++        int next;
++
++        while (count < maxDelimiters && (next = StringLatin1.indexOf(val, ch, off, len)) != -1) {
++            if (count == buf.length) {
++                int newCap = ArraysSupport.newLength(buf.length, 1, buf.length);
++                buf = Arrays.copyOf(buf, limit > 0 ? Math.min(newCap, limit) : newCap);
++            }
++            buf[count++] = newLatin1SubString(val, off, next - off);
++            off = next + 1;
++        }
++
++        if (count == buf.length) {
++            buf = Arrays.copyOf(buf, count + 1);
++        }
++        buf[count++] = newLatin1SubString(val, off, len - off);
++
++        if (limit == 0) {
++            while (count > 0 && buf[count - 1].isEmpty()) {
++                count--;
++            }
++        }
++        return count == buf.length ? buf : Arrays.copyOf(buf, count);
++    }
++
++    private static String[] splitLatin1DenseSwar(
++            byte[] val, char ch, int limit, int firstIdx, int secondIdx) {
++        int len = val.length;
++        int maxDelimiters = limit > 0 ? limit - 1 : Integer.MAX_VALUE;
++        int[] matchOffsets = allocateInitialMatchOffsets(len, secondIdx, maxDelimiters);
++        matchOffsets[0] = firstIdx;
++        matchOffsets[1] = secondIdx;
++        int delimCount = 2;
++
++        byte target = (byte) ch;
++        long broadcastTarget = (target & 0xFFL) * SWAR_BROADCAST_MUL;
++        int i = secondIdx + 1;
++        int swarLimit = len - SWAR_SPLIT_STRIDE;
++
++        if (limit <= 0) {
++            int swar16Limit = len - (SWAR_SPLIT_STRIDE * 2);
++            for (; i <= swar16Limit; i += SWAR_SPLIT_STRIDE * 2) {
++                long word0 = readLittleEndianLong(val, i);
++                long word1 = readLittleEndianLong(val, i + SWAR_SPLIT_STRIDE);
++                long mask0 = findEqualBytesSwarMask(word0, broadcastTarget);
++                long mask1 = findEqualBytesSwarMask(word1, broadcastTarget);
++                if ((mask0 | mask1) != 0L) {
++                    if (delimCount + (SWAR_SPLIT_STRIDE * 2) > matchOffsets.length) {
++                        matchOffsets = growMatchOffsets(
++                                matchOffsets, SWAR_SPLIT_STRIDE * 2, Integer.MAX_VALUE);
++                    }
++                    while (mask0 != 0L) {
++                        matchOffsets[delimCount++] = i + (Long.numberOfTrailingZeros(mask0) >>> 3);
++                        mask0 &= mask0 - 1L;
++                    }
++                    int i1 = i + SWAR_SPLIT_STRIDE;
++                    while (mask1 != 0L) {
++                        matchOffsets[delimCount++] = i1 + (Long.numberOfTrailingZeros(mask1) >>> 3);
++                        mask1 &= mask1 - 1L;
++                    }
++                }
++            }
++            for (; i <= swarLimit; i += SWAR_SPLIT_STRIDE) {
++                long word = readLittleEndianLong(val, i);
++                long mask = findEqualBytesSwarMask(word, broadcastTarget);
++                if (mask != 0L) {
++                    if (delimCount + SWAR_SPLIT_STRIDE > matchOffsets.length) {
++                        matchOffsets = growMatchOffsets(matchOffsets, SWAR_SPLIT_STRIDE, Integer.MAX_VALUE);
++                    }
++                    do {
++                        matchOffsets[delimCount++] = i + (Long.numberOfTrailingZeros(mask) >>> 3);
++                        mask &= mask - 1L;
++                    } while (mask != 0L);
++                }
++            }
++            for (; i < len; i++) {
++                if (val[i] == target) {
++                    if (delimCount == matchOffsets.length) {
++                        matchOffsets = growMatchOffsets(matchOffsets, 1, Integer.MAX_VALUE);
++                    }
++                    matchOffsets[delimCount++] = i;
++                }
++            }
++        } else {
++            outer:
++            for (; i <= swarLimit && delimCount < maxDelimiters; i += SWAR_SPLIT_STRIDE) {
++                long word = readLittleEndianLong(val, i);
++                long mask = findEqualBytesSwarMask(word, broadcastTarget);
++                while (mask != 0L) {
++                    if (delimCount == matchOffsets.length) {
++                        matchOffsets = growMatchOffsets(matchOffsets, 1, maxDelimiters);
++                    }
++                    matchOffsets[delimCount++] = i + (Long.numberOfTrailingZeros(mask) >>> 3);
++                    if (delimCount == maxDelimiters) {
++                        i = len;
++                        break outer;
++                    }
++                    mask &= mask - 1L;
++                }
++            }
++            for (; i < len && delimCount < maxDelimiters; i++) {
++                if (val[i] == target) {
++                    if (delimCount == matchOffsets.length) {
++                        matchOffsets = growMatchOffsets(matchOffsets, 1, maxDelimiters);
++                    }
++                    matchOffsets[delimCount++] = i;
++                }
++            }
++        }
++
++        int resultSize = computeTrimmedResultSize(matchOffsets, delimCount, len, limit);
++        if (resultSize == 0) {
++            return new String[0];
++        }
++
++        String[] result = new String[resultSize];
++        int start = 0;
++        int lastDelimiterIdx = Math.min(delimCount, resultSize);
++        for (int k = 0; k < lastDelimiterIdx; k++) {
++            int end = matchOffsets[k];
++            result[k] = newLatin1SubString(val, start, end - start);
++            start = end + 1;
++        }
++        if (resultSize > delimCount) {
++            result[delimCount] = newLatin1SubString(val, start, len - start);
++        }
++        return result;
++    }
++
++    private String[] splitUtf16WithoutDelimiters(char ch, int limit) {
++        int len = length();
++        if (len == 0 || limit == 1) {
++            return new String[] {this};
++        }
++
++        byte[] val = this.value;
++        int firstIdx = StringUTF16.indexOf(val, ch, 0, len);
++        if (firstIdx < 0) {
++            return new String[] {this};
++        }
++
++        int secondIdx = (limit == 2) ? -1 : StringUTF16.indexOf(val, ch, firstIdx + 1, len);
++        if (secondIdx < 0) {
++            if (limit == 0 && firstIdx + 1 == len) {
++                return firstIdx == 0
++                        ? new String[0]
++                        : new String[] {StringUTF16.newString(val, 0, firstIdx)};
++            }
++            return new String[] {
++                    StringUTF16.newString(val, 0, firstIdx),
++                    StringUTF16.newString(val, firstIdx + 1, len - (firstIdx + 1))
++            };
++        }
++
++        int maxDelimiters = limit > 0 ? limit - 1 : Integer.MAX_VALUE;
++        int[] matchOffsets = allocateInitialMatchOffsets(len, secondIdx, maxDelimiters);
++        matchOffsets[0] = firstIdx;
++        matchOffsets[1] = secondIdx;
++        int delimCount = 2;
++        int off = secondIdx + 1;
++        int next;
++
++        while (delimCount < maxDelimiters && (next = StringUTF16.indexOf(val, ch, off, len)) != -1) {
++            if (delimCount == matchOffsets.length) {
++                matchOffsets = growMatchOffsets(matchOffsets, 1, maxDelimiters);
++            }
++            matchOffsets[delimCount++] = next;
++            off = next + 1;
++        }
++
++        int resultSize = computeTrimmedResultSize(matchOffsets, delimCount, len, limit);
++        if (resultSize == 0) {
++            return new String[0];
++        }
++
++        String[] result = new String[resultSize];
++        int start = 0;
++        int lastDelimiterIdx = Math.min(delimCount, resultSize);
++        for (int k = 0; k < lastDelimiterIdx; k++) {
++            int end = matchOffsets[k];
++            result[k] = StringUTF16.newString(val, start, end - start);
++            start = end + 1;
++        }
++        if (resultSize > delimCount) {
++            result[delimCount] = StringUTF16.newString(val, start, len - start);
++        }
++        return result;
++    }
++
++    private String[] splitWithDelimiters(char ch, int limit) {
+         int matchCount = 0;
+         int off = 0;
+         int next;
+         boolean limited = limit > 0;
+         ArrayList<String> list = new ArrayList<>();
+-        String del = withDelimiters ? String.valueOf(ch) : null;
++        String del = String.valueOf(ch);
+         while ((next = indexOf(ch, off)) != -1) {
+             if (!limited || matchCount < limit - 1) {
+                 list.add(substring(off, next));
+-                if (withDelimiters) {
+-                    list.add(del);
+-                }
++                list.add(del);
+                 off = next + 1;
+                 ++matchCount;
+             } else {    // last one
+diff --git a/src/java.base/share/classes/jdk/internal/math/FloatingDecimal.java b/src/java.base/share/classes/jdk/internal/math/FloatingDecimal.java
+index 067ca9a6406..b10639dec71 100644
+--- a/src/java.base/share/classes/jdk/internal/math/FloatingDecimal.java
++++ b/src/java.base/share/classes/jdk/internal/math/FloatingDecimal.java
+@@ -25,6 +25,10 @@
+ 
+ package jdk.internal.math;
+ 
++import jdk.internal.access.JavaLangAccess;
++import jdk.internal.access.SharedSecrets;
++import jdk.internal.misc.Unsafe;
++import jdk.internal.vm.annotation.ForceInline;
+ import jdk.internal.vm.annotation.Stable;
+ 
+ import static jdk.internal.math.FDBigInteger.valueOfMulPow52;
+@@ -37,6 +41,54 @@
+  * instance may be obtained.
+  */
+ public final class FloatingDecimal {
++    private static final JavaLangAccess JLA = SharedSecrets.getJavaLangAccess();
++    private static final Unsafe UNSAFE = Unsafe.getUnsafe();
++    private static final byte STRING_LATIN1_CODER = 0;
++    private static final long STRING_VALUE_OFFSET =
++            UNSAFE.objectFieldOffset(String.class, "value");
++
++    @ForceInline
++    private static byte[] getLatin1Bytes(String in) {
++        if (JLA.stringCoder(in) == STRING_LATIN1_CODER) {
++            return (byte[]) UNSAFE.getReference(in, STRING_VALUE_OFFSET);
++        }
++        return null;
++    }
++
++    /*
++     * Daniel Lemire's SWAR (SIMD Within A Register) constants for validating
++     * and parsing 8 consecutive ASCII decimal digits in a single 64-bit word.
++     * Reference: fast_float (is_made_of_eight_digits_fast / parse_eight_digits_unrolled).
++     */
++    private static final int  SWAR_CHUNK_BYTES = Long.BYTES;
++    private static final int  SWAR_MAX_SAFE_DIGITS = MathUtils.N - SWAR_CHUNK_BYTES;
++    private static final long SWAR_BASE_10_POW_8 = 100_000_000L;
++    private static final long SWAR_ASCII_ZERO_MASK = 0x3030_3030_3030_3030L;
++    private static final long SWAR_DIGIT_UPPER_BIAS = 0x4646_4646_4646_4646L;
++    private static final long SWAR_MSB_MASK = 0x8080_8080_8080_8080L;
++    private static final long SWAR_BYTE_PAIR_MASK = 0x0000_00FF_0000_00FFL;
++    private static final long SWAR_MUL_STAGE1 = 0x000F_4240_0000_0064L; // 100 + (1_000_000L << 32)
++    private static final long SWAR_MUL_STAGE2 = 0x0000_2710_0000_0001L; // 1 + (10_000L << 32)
++
++    @ForceInline
++    private static long readLittleEndianLong(byte[] bytes, int offset) {
++        long word = UNSAFE.getLongUnaligned(bytes, Unsafe.ARRAY_BYTE_BASE_OFFSET + (long) offset);
++        return UNSAFE.isBigEndian() ? Long.reverseBytes(word) : word;
++    }
++
++    @ForceInline
++    private static boolean isEightAsciiDigits(long chunk) {
++        return (((chunk + SWAR_DIGIT_UPPER_BIAS) | (chunk - SWAR_ASCII_ZERO_MASK)) & SWAR_MSB_MASK) == 0L;
++    }
++
++    @ForceInline
++    private static int parseEightAsciiDigits(long chunk) {
++        long val = chunk - SWAR_ASCII_ZERO_MASK;
++        val = (val * 10L) + (val >>> 8);
++        val = (((val & SWAR_BYTE_PAIR_MASK) * SWAR_MUL_STAGE1)
++                + (((val >>> 16) & SWAR_BYTE_PAIR_MASK) * SWAR_MUL_STAGE2)) >>> 32;
++        return (int) val;
++    }
+     //
+     // Constants of the implementation;
+     // most are IEEE-754 related.
+@@ -1072,6 +1124,184 @@ private double doubleValue() {
+             return signed(v);
+         }
+ 
++        @ForceInline
++        private static double signed(boolean isNegative, double v) {
++            return isNegative ? -v : v;
++        }
++
++        @ForceInline
++        private static float signed(boolean isNegative, float v) {
++            return isNegative ? -v : v;
++        }
++
++        /**
++         * Zero-allocation Clinger + Eisel-Lemire 128-bit fast path for BINARY_64 (double).
++         * Returns the rounded double value on the ~99.96% unambiguous fast path,
++         * or {@code Double.NaN} if the 128-bit interval straddles a midpoint and requires
++         * the {@link FDBigInteger} fallback.
++         */
++        @ForceInline
++        private static double tryFastDoubleValue(
++                boolean isNegative, int e, int n, long fl, boolean firstDigitLt9) {
++            int ep = e - n;
++            double v;
++            if (n <= MathUtils.N && 0 <= ep && e <= MathUtils.N) {
++                long scaled = fl * MathUtils.pow10(ep);  // 0 ≤ ep < 19
++                v = scaled >= 0 ? scaled : 2.0 * (scaled >>> 1 | scaled & 0b1);
++                return signed(isNegative, v);
++            }
++            if (n <= FLOG_10_MAX_LONG && -MAX_SMALL_TEN <= ep) {
++                v = fl;
++                boolean isExact = (long) v == fl;
++                if (isExact && ep <= MAX_SMALL_TEN) {
++                    v = ep >= 0 ? v * SMALL_10_POW[ep] : v / SMALL_10_POW[-ep];
++                    return signed(isNegative, v);
++                }
++                if (isExact) {
++                    int ef = (firstDigitLt9 ? MAX_DEC_DIGITS + 1 : MAX_DEC_DIGITS) - n;
++                    if (ef >= 0 && ep - ef <= MAX_SMALL_TEN) {
++                        v = v * SMALL_10_POW[ef] * SMALL_10_POW[ep - ef];
++                        return signed(isNegative, v);
++                    }
++                }
++            }
++            int el = e - MathUtils.N;
++            int rp = MathUtils.flog2pow10(el) + 2;  // r + 127
++            long g1 = MathUtils.g1(el);
++            long nl1;
++            long nl0;
++            long nh1;
++            long nh0;
++            if (n <= MathUtils.N) {
++                long ll = fl * MathUtils.pow10(MathUtils.N - n);
++                nl1 = Math.unsignedMultiplyHigh(ll, g1);
++                nl0 = ll * g1;
++                nh0 = nl0 + ll;
++                nh1 = nl1 + (Long.compareUnsigned(nh0, nl0) < 0 ? 1L : 0L);
++            } else {
++                long ll = fl;
++                long lh = ll + 1;
++                nl1 = Math.unsignedMultiplyHigh(ll, g1);
++                nl0 = ll * g1;
++                nh1 = Math.unsignedMultiplyHigh(lh, g1 + 1);
++                nh0 = lh * (g1 + 1);
++            }
++            int bl = Long.SIZE - Long.numberOfLeadingZeros(nl1);
++            if (bl + rp > Double.MIN_EXPONENT) {  // implies x is normal
++                double ul = nl1 | (nl0 != 0 ? 1 : 0);
++                double uh = nh1 | (nh0 != 0 ? 1 : 0);
++                v = Math.scalb(ul, rp);
++                if (ul == uh || v == Double.POSITIVE_INFINITY) {
++                    return signed(isNegative, v);
++                }
++            } else {
++                int bh = Long.SIZE - Long.numberOfLeadingZeros(nh1);
++                if (bh + rp <= Double.MIN_EXPONENT) {  // implies x is subnormal
++                    int sh = DoubleToDecimal.Q_MIN - rp;  // shift distance
++                    long sbMask = -1L >>> 1 - sh;
++
++                    long nl1p = nl1 >>> sh;
++                    long rb = nl1 >>> sh - 1;
++                    long sb = (nl1 & sbMask | nl0) != 0 ? 1 : 0;
++                    long corr = rb & (sb | nl1p) & 0b1;
++                    double ul = nl1p + corr;
++
++                    long nh1p = nh1 >>> sh;
++                    rb = nh1 >>> sh - 1;
++                    sb = (nh1 & sbMask | nh0) != 0 ? 1 : 0;
++                    corr = rb & (sb | nh1p) & 0b1;
++                    double uh = nh1p + corr;
++                    v = Math.scalb(ul, rp + sh);
++                    if (ul == uh) {
++                        return signed(isNegative, v);
++                    }
++                } else {
++                    return signed(isNegative, Double.MIN_NORMAL);
++                }
++            }
++            return Double.NaN;
++        }
++
++        /**
++         * Zero-allocation Clinger + Eisel-Lemire 128-bit fast path for BINARY_32 (float).
++         * Returns the rounded float value on the ~99.999% unambiguous fast path,
++         * or {@code Float.NaN} if the 128-bit interval straddles a midpoint and requires
++         * the {@link FDBigInteger} fallback.
++         */
++        @ForceInline
++        private static float tryFastFloatValue(boolean isNegative, int e, int n, long fl) {
++            int ep = e - n;
++            float v;
++            if (n <= MathUtils.N && 0 <= ep && e <= MathUtils.N) {
++                long scaled = fl * MathUtils.pow10(ep);  // 0 ≤ ep < 19
++                v = scaled >= 0 ? scaled : 2.0f * (scaled >>> 1 | scaled & 0b1);
++                return signed(isNegative, v);
++            }
++            if (n <= FLOG_10_MAX_LONG && -SINGLE_MAX_SMALL_TEN <= ep) {
++                v = fl;
++                boolean isExact = (long) v == fl;
++                if (isExact && ep <= SINGLE_MAX_SMALL_TEN) {
++                    v = ep >= 0 ? v * SINGLE_SMALL_10_POW[ep] : v / SINGLE_SMALL_10_POW[-ep];
++                    return signed(isNegative, v);
++                }
++            }
++            int el = e - MathUtils.N;
++            int rp = MathUtils.flog2pow10(el) + 2;
++            long g1 = MathUtils.g1(el);
++            long nl1;
++            long nl0;
++            long nh1;
++            long nh0;
++            if (n <= MathUtils.N) {
++                long ll = fl * MathUtils.pow10(MathUtils.N - n);
++                nl1 = Math.unsignedMultiplyHigh(ll, g1);
++                nl0 = ll * g1;
++                nh0 = nl0 + ll;
++                nh1 = nl1 + (Long.compareUnsigned(nh0, nl0) < 0 ? 1L : 0L);
++            } else {
++                long ll = fl;
++                long lh = ll + 1;
++                nl1 = Math.unsignedMultiplyHigh(ll, g1);
++                nl0 = ll * g1;
++                nh1 = Math.unsignedMultiplyHigh(lh, g1 + 1);
++                nh0 = lh * (g1 + 1);
++            }
++            int bl = Long.SIZE - Long.numberOfLeadingZeros(nl1);
++            if (bl + rp > Float.MIN_EXPONENT) {
++                float ul = nl1 | (nl0 != 0 ? 1 : 0);
++                float uh = nh1 | (nh0 != 0 ? 1 : 0);
++                v = Math.scalb(ul, rp);
++                if (ul == uh || v == Float.POSITIVE_INFINITY) {
++                    return signed(isNegative, v);
++                }
++            } else {
++                int bh = Long.SIZE - Long.numberOfLeadingZeros(nh1);
++                if (bh + rp <= Float.MIN_EXPONENT) {
++                    int sh = FloatToDecimal.Q_MIN - rp;
++                    long sbMask = -1L >>> 1 - sh;
++
++                    long nl1p = nl1 >>> sh;
++                    long rb = nl1 >>> sh - 1;
++                    long sb = (nl1 & sbMask | nl0) != 0 ? 1 : 0;
++                    long corr = rb & (sb | nl1p) & 0b1;
++                    float ul = nl1p + corr;
++
++                    long nh1p = nh1 >>> sh;
++                    rb = nh1 >>> sh - 1;
++                    sb = (nh1 & sbMask | nh0) != 0 ? 1 : 0;
++                    corr = rb & (sb | nh1p) & 0b1;
++                    float uh = nh1p + corr;
++                    v = Math.scalb(ul, rp + sh);
++                    if (ul == uh) {
++                        return signed(isNegative, v);
++                    }
++                } else {
++                    return signed(isNegative, Float.MIN_NORMAL);
++                }
++            }
++            return Float.NaN;
++        }
++
+         private double signed(double v) {
+             return isNegative ? -v : v;
+         }
+@@ -1312,7 +1542,172 @@ private static double readJavaFormatString(String in, int ix) {
+          * but is much shorter in common cases.
+          */
+         int len = in.length();  // fail fast on null
++        byte[] latin1Bytes = getLatin1Bytes(in);
++        if (latin1Bytes != null) {
++            return readLatin1FormatString(in, latin1Bytes, len, ix);
++        }
++        return readUtf16FormatString(in, len, ix);
++    }
+ 
++    /**
++     * Single-pass, zero-allocation decimal scanner and converter for Latin-1 strings,
++     * accelerated by Daniel Lemire's 8-digit SWAR block parsing.
++     * Falls back to {@link #readUtf16FormatString(String, int, int)} for hexadecimal float literals.
++     */
++    private static double readLatin1FormatString(String in, byte[] bytes, int len, int ix) {
++        int i = skipWhitespacesLatin1(bytes, 0, len);
++        if (i == len) {
++            throw new NumberFormatException("empty String");
++        }
++
++        int ch = bytes[i] & 0xFF;
++        int ssign = ' ';
++        if (ch == '-' || ch == '+') {
++            ssign = ch;
++            ++i;
++        }
++
++        if (i < len) {
++            ch = bytes[i] & 0xFF;
++            if (ch == 'I') {
++                scanSymbolic(in, i, INFINITY_REP);
++                return ssign != '-' ? Double.POSITIVE_INFINITY : Double.NEGATIVE_INFINITY;
++            }
++            if (ch == 'N') {
++                scanSymbolic(in, i, NAN_REP);
++                return Double.NaN;
++            }
++            if (ch == '0' && i + 1 < len && toLowerCase(bytes[i + 1] & 0xFF) == 'x') {
++                return readUtf16FormatString(in, len, ix);
++            }
++        }
++
++        int pt = 0;     // index after point, 0 iff absent
++        int start = i;  // index of start of the significand, excluding opt sign
++
++        /* Skip opt leading zeros, including an opt point. */
++        while (i < len && ((ch = bytes[i] & 0xFF) == '0' || ch == '.')) {
++            ++i;
++            if (ch == '.') {
++                pt = checkMultiplePoints(pt, i);
++            }
++        }
++        int lz = i;     // index after leading group of zeros or point
++
++        int tnz = 0;    // index after trailing group of non-zeros, 0 iff absent
++        long fl = 0L;   // unsigned 64-bit significand prefix (up to MathUtils.N = 19 digits)
++        int flDigits = 0;
++        int flNonZeroDigits = 0;
++
++        /* SWAR 8-digit fast scan from lz (before or after leading point). */
++        while (i + SWAR_CHUNK_BYTES <= len && flDigits <= SWAR_MAX_SAFE_DIGITS) {
++            long chunk = readLittleEndianLong(bytes, i);
++            if (isEightAsciiDigits(chunk) && (chunk >>> 56) != '0') {
++                fl = fl * SWAR_BASE_10_POW_8 + parseEightAsciiDigits(chunk);
++                flDigits += SWAR_CHUNK_BYTES;
++                i += SWAR_CHUNK_BYTES;
++                tnz = i;
++                flNonZeroDigits = flDigits;
++            } else {
++                break;
++            }
++        }
++
++        /* Scan remaining chars of the significand, including an opt point. */
++        while (i < len) {
++            ch = bytes[i] & 0xFF;
++            if (ch >= '0' && ch <= '9') {
++                ++i;
++                if (flDigits < MathUtils.N) {
++                    fl = fl * 10L + (ch - '0');
++                    ++flDigits;
++                }
++                if (ch != '0') {
++                    tnz = i;
++                    flNonZeroDigits = flDigits;
++                }
++            } else if (ch == '.') {
++                ++i;
++                pt = checkMultiplePoints(pt, i);
++                /* SWAR 8-digit fast scan immediately following decimal point. */
++                while (i + SWAR_CHUNK_BYTES <= len && flDigits <= SWAR_MAX_SAFE_DIGITS) {
++                    long chunk = readLittleEndianLong(bytes, i);
++                    if (isEightAsciiDigits(chunk) && (chunk >>> 56) != '0') {
++                        fl = fl * SWAR_BASE_10_POW_8 + parseEightAsciiDigits(chunk);
++                        flDigits += SWAR_CHUNK_BYTES;
++                        i += SWAR_CHUNK_BYTES;
++                        tnz = i;
++                        flNonZeroDigits = flDigits;
++                    } else {
++                        break;
++                    }
++                }
++            } else {
++                break;
++            }
++        }
++        check(in, i - start > (pt != 0 ? 1 : 0));  // must have at least one digit
++        int stop = i;  // index after the significand
++
++        /* Scan optional decimal exponent part. */
++        long ep = 0L;
++        if (i < len && toLowerCase(bytes[i] & 0xFF) == 'e') {
++            ++i;
++            int esign = ' ';
++            if (i < len && ((ch = bytes[i] & 0xFF) == '-' || ch == '+')) {
++                esign = ch;
++                ++i;
++            }
++            while (i < len && (ch = bytes[i] & 0xFF) >= '0' && ch <= '9') {
++                ++i;
++                ep = appendDecDigit(ep, ch);
++            }
++            check(in, i - stop >= 3 || i - stop == 2 && esign == ' ');
++            if (esign == '-') {
++                ep = -ep;
++            }
++        }
++
++        /* Skip opt [FfDd]? suffix. */
++        if (i < len && ((ch = toLowerCase(bytes[i] & 0xFF)) == 'f' || ch == 'd')) {
++            ++i;
++        }
++
++        /* Skip optional trailing whitespaces, then must be at the end of input. */
++        check(in, skipWhitespacesLatin1(bytes, i, len) == len);
++
++        if (tnz == 0) {  // all zero digits, so ignore ep and point
++            return ssign != '-' ? 0.0 : -0.0;
++        }
++
++        int n = tnz - lz;
++        if (pt == 0) {
++            ep += stop - tnz;
++        } else {
++            ep += pt - tnz;
++            if (pt > tnz) {
++                ep -= 1L;
++            } else if (lz < pt) {
++                n -= 1;
++            }
++        }
++
++        int e = Math.clamp(ep + n, E_THR_Z[ix], E_THR_I[ix]);
++        if (e == E_THR_Z[ix]) {
++            return ssign != '-' ? 0.0 : -0.0;
++        }
++        if (e == E_THR_I[ix]) {
++            return ssign != '-' ? Double.POSITIVE_INFINITY : Double.NEGATIVE_INFINITY;
++        }
++
++        if (flDigits > flNonZeroDigits) {
++            fl = Long.divideUnsigned(fl, MathUtils.pow10(flDigits - flNonZeroDigits));
++        }
++        boolean firstDigitLt9 = (bytes[lz] & 0xFF) < '9';
++        return convertDecimalToBinary(in, ix, ssign == '-', e, n, lz, fl, firstDigitLt9);
++    }
++
++    private static double readUtf16FormatString(String in, int len, int ix) {
+         /* Skip leading whitespaces. */
+         int i = skipWhitespaces(in, 0);  // main running index
+         if (i == len) {
+@@ -1363,12 +1758,22 @@ private static double readJavaFormatString(String in, int ix) {
+          * inside this range of the input.
+          */
+         int tnz = 0;  // index after trailing group of non-zeros, 0 iff absent
++        long fl = 0L;
++        int flDigits = 0;
++        int flNonZeroDigits = 0;
+         while (i < len && (isDigit(ch = in.charAt(i), isDec) || ch == '.')) {
+             i++;
+             if (ch == '.') {
+                 pt = checkMultiplePoints(pt, i);
+-            } else if (ch != '0') {
+-                tnz = i;
++            } else {
++                if (isDec && flDigits < MathUtils.N) {
++                    fl = fl * 10L + (ch - '0');
++                    ++flDigits;
++                }
++                if (ch != '0') {
++                    tnz = i;
++                    flNonZeroDigits = flDigits;
++                }
+             }
+         }
+         check(in, i - start > (pt != 0 ? 1 : 0));  // must have at least one digit
+@@ -1553,8 +1958,9 @@ private static double readJavaFormatString(String in, int ix) {
+         }
+ 
+         /*
+-         * For decimal inputs, we copy an appropriate prefix of the input and
+-         * rely on another method to do the (sometimes intensive) math conversion.
++         * For decimal inputs, we attempt the zero-allocation fast path first,
++         * and only copy an appropriate prefix of the input if the 128-bit interval
++         * straddles a rounding midpoint (~0.04% of inputs).
+          *
+          * Define e = n + ep, which leads to
+          *      x = 0.d_1 ... d_n 10^e, 10^(e-1) ≤ x < 10^e
+@@ -1571,6 +1977,35 @@ private static double readJavaFormatString(String in, int ix) {
+             return ssign != '-' ? Double.POSITIVE_INFINITY : Double.NEGATIVE_INFINITY;
+         }
+ 
++        if (flDigits > flNonZeroDigits) {
++            fl = Long.divideUnsigned(fl, MathUtils.pow10(flDigits - flNonZeroDigits));
++        }
++        return convertDecimalToBinary(in, ix, ssign == '-', e, n, lz, fl, in.charAt(lz) < '9');
++    }
++
++    @ForceInline
++    private static double convertDecimalToBinary(
++            String in, int ix, boolean isNegative, int e, int n, int lz, long fl, boolean firstDigitLt9) {
++        switch (ix) {
++            case BINARY_64_IX -> {
++                double fast = ASCIIToBinaryBuffer.tryFastDoubleValue(isNegative, e, n, fl, firstDigitLt9);
++                if (!Double.isNaN(fast)) {
++                    return fast;
++                }
++            }
++            case BINARY_32_IX -> {
++                float fast = ASCIIToBinaryBuffer.tryFastFloatValue(isNegative, e, n, fl);
++                if (!Float.isNaN(fast)) {
++                    return fast;
++                }
++            }
++            default -> throw new AssertionError("unexpected");
++        }
++        return slowDecimalToBinary(in, ix, isNegative, e, n, lz);
++    }
++
++    private static double slowDecimalToBinary(
++            String in, int ix, boolean isNegative, int e, int n, int lz) {
+         /*
+          * For further considerations, x also needs to be seen as
+          *      x = beta 2^q
+@@ -1647,9 +2082,9 @@ private static double readJavaFormatString(String in, int ix) {
+         /* For now throw on BINARY_16_IX, until Float16 is integrated in java.base. */
+         return switch (ix) {
+             case BINARY_32_IX ->
+-                    new ASCIIToBinaryBuffer(ssign == '-', e, d, d.length).floatValue();
++                    new ASCIIToBinaryBuffer(isNegative, e, d, d.length).floatValue();
+             case BINARY_64_IX ->
+-                    new ASCIIToBinaryBuffer(ssign == '-', e, d, d.length).doubleValue();
++                    new ASCIIToBinaryBuffer(isNegative, e, d, d.length).doubleValue();
+             default -> throw new AssertionError("unexpected");
+         };
+     }
+@@ -1715,6 +2150,12 @@ private static int skipWhitespaces(String in, int i) {
+         return i;
+     }
+ 
++    @ForceInline
++    private static int skipWhitespacesLatin1(byte[] bytes, int i, int len) {
++        for (; i < len && (bytes[i] & 0xFF) <= ' '; ++i);  // empty body
++        return i;
++    }
++
+     /*
+      * Attempts to scan sub and optional trailing whitespaces, starting at index i.
+      * The optional whitespaces must be at the end of in.

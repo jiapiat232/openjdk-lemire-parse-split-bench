@@ -1,0 +1,1226 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>OpenJDK vs. Daniel Lemire (fast_float & SIMD String.split) — ARM64 & RISC-V 64 JMH 性能基准测试报告</title>
+  <style>
+    :root[data-theme="dark"] {
+      --bg-primary: #0b0f17;
+      --bg-secondary: #131b2e;
+      --bg-card: #161f33;
+      --bg-card-hover: #1c2842;
+      --bg-code: #0d1322;
+      --border-color: #26334d;
+      --text-primary: #e6edf3;
+      --text-secondary: #9fb0c7;
+      --text-muted: #6e829f;
+      --accent-blue: #38bdf8;
+      --accent-indigo: #818cf8;
+      --accent-emerald: #34d399;
+      --accent-amber: #fbbf24;
+      --accent-rose: #fb7185;
+      --accent-purple: #c084fc;
+      --bar-jdk: #64748b;
+      --bar-java-lemire: #38bdf8;
+      --bar-ffm: #818cf8;
+      --bar-best: #10b981;
+      --bar-pure: #f59e0b;
+      --shadow: 0 10px 30px -10px rgba(0, 0, 0, 0.6);
+    }
+
+    :root[data-theme="light"] {
+      --bg-primary: #f8fafc;
+      --bg-secondary: #f1f5f9;
+      --bg-card: #ffffff;
+      --bg-card-hover: #f8fafc;
+      --bg-code: #f1f5f9;
+      --border-color: #e2e8f0;
+      --text-primary: #0f172a;
+      --text-secondary: #334155;
+      --text-muted: #64748b;
+      --accent-blue: #0284c7;
+      --accent-indigo: #4f46e5;
+      --accent-emerald: #059669;
+      --accent-amber: #d97706;
+      --accent-rose: #e11d48;
+      --accent-purple: #7c3aed;
+      --bar-jdk: #94a3b8;
+      --bar-java-lemire: #0284c7;
+      --bar-ffm: #6366f1;
+      --bar-best: #10b981;
+      --bar-pure: #f59e0b;
+      --shadow: 0 10px 25px -5px rgba(15, 23, 42, 0.08);
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+      background-color: var(--bg-primary);
+      color: var(--text-primary);
+      line-height: 1.6;
+      padding-bottom: 64px;
+      transition: background-color 0.2s ease, color 0.2s ease;
+    }
+
+    code, pre, .mono {
+      font-family: "SF Mono", "JetBrains Mono", "Fira Code", Menlo, Consolas, monospace;
+    }
+
+    .container {
+      max-width: 1440px;
+      margin: 0 auto;
+      padding: 0 28px;
+    }
+
+    /* Header */
+    header {
+      background: linear-gradient(135deg, var(--bg-secondary) 0%, var(--bg-primary) 100%);
+      border-bottom: 1px solid var(--border-color);
+      padding: 36px 0 28px;
+      margin-bottom: 32px;
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      backdrop-filter: blur(12px);
+    }
+
+    .header-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 20px;
+      flex-wrap: wrap;
+    }
+
+    .title-group h1 {
+      font-size: 1.75rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      margin-bottom: 8px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .subtitle {
+      color: var(--text-secondary);
+      font-size: 0.95rem;
+    }
+
+    .controls {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    .btn {
+      background: var(--bg-card);
+      color: var(--text-primary);
+      border: 1px solid var(--border-color);
+      padding: 8px 16px;
+      border-radius: 8px;
+      font-size: 0.875rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.15s ease;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .btn:hover {
+      background: var(--bg-card-hover);
+      border-color: var(--accent-blue);
+    }
+
+    .btn.active {
+      background: var(--accent-blue);
+      color: #0b0f17;
+      border-color: var(--accent-blue);
+    }
+
+    /* KPI Summary Cards */
+    .kpi-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 18px;
+      margin-bottom: 36px;
+    }
+
+    .kpi-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border-color);
+      border-radius: 14px;
+      padding: 20px 22px;
+      box-shadow: var(--shadow);
+      position: relative;
+      overflow: hidden;
+    }
+
+    .kpi-card::before {
+      content: "";
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 4px;
+      height: 100%;
+      background: var(--accent-emerald);
+    }
+
+    .kpi-card.riscv::before {
+      background: var(--accent-amber);
+    }
+
+    .kpi-tag {
+      font-size: 0.75rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--text-muted);
+      margin-bottom: 6px;
+    }
+
+    .kpi-title {
+      font-size: 1rem;
+      font-weight: 600;
+      color: var(--text-secondary);
+      margin-bottom: 10px;
+    }
+
+    .kpi-value {
+      font-size: 2rem;
+      font-weight: 800;
+      color: var(--accent-emerald);
+      line-height: 1.1;
+      margin-bottom: 8px;
+    }
+
+    .kpi-card.riscv .kpi-value {
+      color: var(--accent-amber);
+    }
+
+    .kpi-detail {
+      font-size: 0.84rem;
+      color: var(--text-secondary);
+    }
+
+    /* Section */
+    .section {
+      background: var(--bg-card);
+      border: 1px solid var(--border-color);
+      border-radius: 16px;
+      padding: 28px;
+      margin-bottom: 32px;
+      box-shadow: var(--shadow);
+    }
+
+    .section-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 16px;
+      margin-bottom: 20px;
+      padding-bottom: 16px;
+      border-bottom: 1px solid var(--border-color);
+      flex-wrap: wrap;
+    }
+
+    .section-title {
+      font-size: 1.35rem;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .arch-badge {
+      font-size: 0.78rem;
+      font-weight: 700;
+      padding: 4px 10px;
+      border-radius: 999px;
+      letter-spacing: 0.03em;
+    }
+
+    .arch-arm64 {
+      background: rgba(56, 189, 248, 0.15);
+      color: var(--accent-blue);
+      border: 1px solid rgba(56, 189, 248, 0.35);
+    }
+
+    .arch-riscv {
+      background: rgba(251, 191, 36, 0.15);
+      color: var(--accent-amber);
+      border: 1px solid rgba(251, 191, 36, 0.35);
+    }
+
+    .arch-cross {
+      background: rgba(192, 132, 252, 0.15);
+      color: var(--accent-purple);
+      border: 1px solid rgba(192, 132, 252, 0.35);
+    }
+
+    .env-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-bottom: 20px;
+    }
+
+    .env-pill {
+      background: var(--bg-code);
+      border: 1px solid var(--border-color);
+      padding: 5px 12px;
+      border-radius: 8px;
+      font-size: 0.82rem;
+      color: var(--text-secondary);
+    }
+
+    .env-pill strong {
+      color: var(--text-primary);
+    }
+
+    /* Tables */
+    .table-wrap {
+      overflow-x: auto;
+      border-radius: 12px;
+      border: 1px solid var(--border-color);
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.9rem;
+    }
+
+    th {
+      background: var(--bg-secondary);
+      color: var(--text-secondary);
+      font-weight: 700;
+      text-align: left;
+      padding: 13px 16px;
+      border-bottom: 1px solid var(--border-color);
+      white-space: nowrap;
+    }
+
+    th.num, td.num {
+      text-align: right;
+    }
+
+    td {
+      padding: 13px 16px;
+      border-bottom: 1px solid var(--border-color);
+      vertical-align: middle;
+    }
+
+    tr:last-child td {
+      border-bottom: none;
+    }
+
+    tr:hover td {
+      background: var(--bg-card-hover);
+    }
+
+    tr.group-start td {
+      border-top: 2px solid var(--border-color);
+    }
+
+    .cat-cell {
+      font-weight: 700;
+      color: var(--text-primary);
+      background: rgba(15, 23, 42, 0.18);
+      min-width: 175px;
+    }
+
+    .cat-sub {
+      display: block;
+      font-size: 0.76rem;
+      font-weight: 400;
+      color: var(--text-muted);
+      margin-top: 3px;
+    }
+
+    .method-name {
+      font-size: 0.82rem;
+      color: var(--accent-blue);
+      background: var(--bg-code);
+      padding: 3px 7px;
+      border-radius: 6px;
+      border: 1px solid var(--border-color);
+      display: inline-block;
+      white-space: nowrap;
+    }
+
+    .badge-speedup {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      font-weight: 700;
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-size: 0.84rem;
+      white-space: nowrap;
+    }
+
+    .speed-baseline {
+      background: rgba(100, 116, 139, 0.2);
+      color: var(--text-secondary);
+    }
+
+    .speed-fast {
+      background: rgba(56, 189, 248, 0.16);
+      color: var(--accent-blue);
+      border: 1px solid rgba(56, 189, 248, 0.35);
+    }
+
+    .speed-best {
+      background: rgba(16, 185, 129, 0.18);
+      color: var(--accent-emerald);
+      border: 1px solid rgba(16, 185, 129, 0.4);
+    }
+
+    .speed-pure {
+      background: rgba(245, 158, 11, 0.16);
+      color: var(--accent-amber);
+      border: 1px solid rgba(245, 158, 11, 0.4);
+    }
+
+    .speed-slow {
+      background: rgba(251, 113, 133, 0.15);
+      color: var(--accent-rose);
+    }
+
+    /* Visual Bar inside Table */
+    .bar-wrap {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      justify-content: flex-end;
+    }
+
+    .mini-bar-bg {
+      width: 110px;
+      height: 8px;
+      background: var(--bg-code);
+      border-radius: 999px;
+      overflow: hidden;
+      flex-shrink: 0;
+    }
+
+    .mini-bar-fill {
+      height: 100%;
+      border-radius: 999px;
+      transition: width 0.5s ease;
+    }
+
+    /* Interactive Chart Grid */
+    .charts-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(560px, 1fr));
+      gap: 22px;
+      margin-top: 24px;
+    }
+
+    .chart-box {
+      background: var(--bg-secondary);
+      border: 1px solid var(--border-color);
+      border-radius: 12px;
+      padding: 20px;
+    }
+
+    .chart-box h4 {
+      font-size: 0.98rem;
+      margin-bottom: 14px;
+      color: var(--text-primary);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .chart-row {
+      margin-bottom: 12px;
+    }
+
+    .chart-row:last-child {
+      margin-bottom: 0;
+    }
+
+    .chart-label-line {
+      display: flex;
+      justify-content: space-between;
+      font-size: 0.82rem;
+      margin-bottom: 4px;
+      color: var(--text-secondary);
+    }
+
+    .chart-track {
+      height: 14px;
+      background: var(--bg-code);
+      border-radius: 7px;
+      overflow: hidden;
+      border: 1px solid var(--border-color);
+    }
+
+    .chart-bar {
+      height: 100%;
+      border-radius: 7px;
+    }
+
+    .note-box {
+      background: rgba(56, 189, 248, 0.08);
+      border-left: 4px solid var(--accent-blue);
+      padding: 14px 18px;
+      border-radius: 8px;
+      font-size: 0.88rem;
+      color: var(--text-secondary);
+      margin-bottom: 20px;
+    }
+
+    .note-box.amber {
+      background: rgba(251, 191, 36, 0.08);
+      border-left-color: var(--accent-amber);
+    }
+
+    .note-box strong {
+      color: var(--text-primary);
+    }
+
+    @media (max-width: 768px) {
+      .charts-grid {
+        grid-template-columns: 1fr;
+      }
+      .title-group h1 {
+        font-size: 1.35rem;
+      }
+    }
+  </style>
+</head>
+<body>
+
+  <header>
+    <div class="container">
+      <div class="header-top">
+        <div class="title-group">
+          <h1>
+            <span>OpenJDK 标准库 vs. Daniel Lemire 算法 (JEP 454 FFM & 纯 Java)</span>
+          </h1>
+          <p class="subtitle">
+            <code>Double.parseDouble</code> · <code>Float.parseFloat</code> · <code>String.split(",")</code> · 整行切分+解析流水线 ｜ Apple Silicon <code>arm64</code> &amp; Docker QEMU <code>riscv64</code> JMH 实测报告
+          </p>
+        </div>
+        <div class="controls">
+          <button class="btn active" onclick="filterArch('all', this)">全部视图</button>
+          <button class="btn" onclick="filterArch('arm64', this)">仅看 ARM64</button>
+          <button class="btn" onclick="filterArch('riscv64', this)">仅看 QEMU RISC-V 64</button>
+          <button class="btn" onclick="filterArch('summary', this)">跨架构汇总</button>
+          <button class="btn" onclick="toggleTheme()" id="themeBtn">☀️ 切换浅色</button>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <main class="container">
+
+    <!-- Top KPI Cards -->
+    <div class="kpi-grid">
+      <div class="kpi-card">
+        <div class="kpi-tag">Apple Silicon ARM64 · Double.parseDouble</div>
+        <div class="kpi-title">单双精度浮点数解析加速</div>
+        <div class="kpi-value">3.04x 🚀</div>
+        <div class="kpi-detail">
+          OpenJDK <code>35.74 ns</code> → FFM <code>critical(true)</code> + Lemire <code>fast_float</code> <strong><code>11.75 ns</code></strong>（纯 Java 移植版 <strong><code>12.50 ns / 2.86x</code></strong>）
+        </div>
+      </div>
+
+      <div class="kpi-card">
+        <div class="kpi-tag">Apple Silicon ARM64 · String.split(",")</div>
+        <div class="kpi-title">256 字段逗号切分加速</div>
+        <div class="kpi-value">12.88x 🏆</div>
+        <div class="kpi-detail">
+          OpenJDK <code>1,844.40 ns</code> → FFM + ARM64 NEON 64B 位掩码零拷贝 <strong><code>143.17 ns</code></strong>（返回精确 <code>String[256]</code> 为 <strong><code>1,370.68 ns / 1.35x</code></strong>）
+        </div>
+      </div>
+
+      <div class="kpi-card riscv">
+        <div class="kpi-tag">QEMU RISC-V 64 · Double.parseDouble</div>
+        <div class="kpi-title">RISC-V 双精度解析加速</div>
+        <div class="kpi-value">4.05x / 6.34x 🏆</div>
+        <div class="kpi-detail">
+          OpenJDK <code>668.29 ns</code> → 纯 Java Eisel-Lemire <strong><code>165.07 ns (4.05x)</code></strong>；FFM <code>285.28 ns (2.34x)</code>，剥离 QEMU 跨界开销后纯 RISC-V 仅 <strong><code>105.43 ns (6.34x)</code></strong>
+        </div>
+      </div>
+
+      <div class="kpi-card riscv">
+        <div class="kpi-tag">QEMU RISC-V 64 · 切分 + 解析 256 个 double</div>
+        <div class="kpi-title">RISC-V 整行流水线加速</div>
+        <div class="kpi-value">4.41x / 11.75x 🏆</div>
+        <div class="kpi-detail">
+          OpenJDK <code>310.80 μs</code> → FFM + RVV 1.0 位掩码 + <code>fast_float</code> <strong><code>70.50 μs (4.41x)</code></strong>（纯 RISC-V 原生流水线 <strong><code>26.45 μs / 11.75x</code></strong>）
+        </div>
+      </div>
+    </div>
+
+    <!-- ==================== TABLE 1: ARM64 ==================== -->
+    <section class="section arch-section" id="sec-arm64">
+      <div class="section-header">
+        <div class="section-title">
+          <span>表 1：Apple Silicon <code>arm64</code> 原生环境 — OpenJDK 标准库 vs. OpenJDK + Daniel Lemire 版本对比</span>
+          <span class="arch-badge arch-arm64">macOS darwin/arm64 · Native</span>
+        </div>
+      </div>
+
+      <div class="env-meta">
+        <span class="env-pill"><strong>CPU/OS:</strong> Apple Silicon (macOS arm64)</span>
+        <span class="env-pill"><strong>JDK:</strong> OpenJDK 27.0.1.0.2 (JEP 454 FFM)</span>
+        <span class="env-pill"><strong>Native 编译器:</strong> Apple Clang 22.1.8 (<code>-O3 -std=c++20 -mcpu=native</code>)</span>
+        <span class="env-pill"><strong>测试集:</strong> 256 个随机科学计数法/常规浮点数（4.4 KB <code>csvLine</code>），100% Bit-exact (0 ULP)</span>
+      </div>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>测试场景</th>
+              <th>JMH Benchmark 方法</th>
+              <th>实现方案说明</th>
+              <th class="num">平均耗时 (<code>ns/op</code>)</th>
+              <th class="num">误差 (<code>± ns/op</code>)</th>
+              <th class="num">耗时比例视图</th>
+              <th class="num">相对 OpenJDK 加速比</th>
+            </tr>
+          </thead>
+          <tbody>
+            <!-- 1. Double.parseDouble -->
+            <tr>
+              <td class="cat-cell" rowspan="5">
+                1. 双精度解析 (<code>double</code>)
+                <span class="cat-sub">单数字耗时 · 越小越快</span>
+              </td>
+              <td><span class="method-name">parseDouble_1_JdkStandard</span></td>
+              <td><strong>OpenJDK 标准实现</strong>：<code>Double.parseDouble</code>（<code>FloatingDecimal</code> + <code>FDBigInteger</code> 慢路径回退）</td>
+              <td class="num mono"><strong>35.737</strong></td>
+              <td class="num mono">± 2.070</td>
+              <td class="num">
+                <div class="bar-wrap">
+                  <div class="mini-bar-bg"><div class="mini-bar-fill" style="width:100%; background:var(--bar-jdk)"></div></div>
+                </div>
+              </td>
+              <td class="num"><span class="badge-speedup speed-baseline">1.00x (基准)</span></td>
+            </tr>
+            <tr>
+              <td><span class="method-name">parseDouble_2_FastDoubleParser_PureJava</span></td>
+              <td><strong>OpenJDK + Lemire 纯 Java 移植版</strong>：<code>JavaDoubleParser.parseDouble</code>（基于 <code>Math.unsignedMultiplyHigh</code> 的 Eisel-Lemire 算法）</td>
+              <td class="num mono"><strong>12.502</strong></td>
+              <td class="num mono">± 0.898</td>
+              <td class="num">
+                <div class="bar-wrap">
+                  <div class="mini-bar-bg"><div class="mini-bar-fill" style="width:35.0%; background:var(--bar-java-lemire)"></div></div>
+                </div>
+              </td>
+              <td class="num"><span class="badge-speedup speed-fast">2.86x 🚀</span></td>
+            </tr>
+            <tr>
+              <td><span class="method-name">parseDouble_3_FfmLemireFastFloat_NormalOffHeap</span></td>
+              <td><strong>OpenJDK FFM (Normal Downcall + 堆外内存) + Lemire <code>fast_float.h</code></strong>：含 <code>_thread_in_Java → _thread_in_native</code> 状态切换</td>
+              <td class="num mono"><strong>13.332</strong></td>
+              <td class="num mono">± 0.683</td>
+              <td class="num">
+                <div class="bar-wrap">
+                  <div class="mini-bar-bg"><div class="mini-bar-fill" style="width:37.3%; background:var(--bar-ffm)"></div></div>
+                </div>
+              </td>
+              <td class="num"><span class="badge-speedup speed-fast">2.68x 🚀</span></td>
+            </tr>
+            <tr>
+              <td><span class="method-name">parseDouble_4_FfmLemireFastFloat_CriticalOffHeap</span></td>
+              <td><strong>OpenJDK FFM (<code>critical(false)</code> + 堆外内存) + Lemire <code>fast_float.h</code></strong>：省去 Safepoint 线程状态切换</td>
+              <td class="num mono"><strong>12.862</strong></td>
+              <td class="num mono">± 0.930</td>
+              <td class="num">
+                <div class="bar-wrap">
+                  <div class="mini-bar-bg"><div class="mini-bar-fill" style="width:36.0%; background:var(--bar-ffm)"></div></div>
+                </div>
+              </td>
+              <td class="num"><span class="badge-speedup speed-fast">2.78x 🚀</span></td>
+            </tr>
+            <tr>
+              <td><span class="method-name">parseDouble_5_FfmLemireFastFloat_CriticalHeapZeroCopy</span></td>
+              <td><strong>OpenJDK FFM (<code>critical(true)</code> 零拷贝直读 Java <code>byte[]</code>) + Lemire <code>fast_float.h</code></strong>（ARM64 <code>umulh</code> + SWAR 8位块解析）</td>
+              <td class="num mono"><strong>11.751</strong></td>
+              <td class="num mono">± 0.140</td>
+              <td class="num">
+                <div class="bar-wrap">
+                  <div class="mini-bar-bg"><div class="mini-bar-fill" style="width:32.9%; background:var(--bar-best)"></div></div>
+                </div>
+              </td>
+              <td class="num"><span class="badge-speedup speed-best">3.04x 🏆</span></td>
+            </tr>
+
+            <!-- 2. Float.parseFloat -->
+            <tr class="group-start">
+              <td class="cat-cell" rowspan="3">
+                2. 单精度解析 (<code>float</code>)
+                <span class="cat-sub">单数字耗时 · 越小越快</span>
+              </td>
+              <td><span class="method-name">parseFloat_1_JdkStandard</span></td>
+              <td><strong>OpenJDK 标准实现</strong>：<code>Float.parseFloat</code></td>
+              <td class="num mono"><strong>20.956</strong></td>
+              <td class="num mono">± 0.733</td>
+              <td class="num">
+                <div class="bar-wrap">
+                  <div class="mini-bar-bg"><div class="mini-bar-fill" style="width:87.2%; background:var(--bar-jdk)"></div></div>
+                </div>
+              </td>
+              <td class="num"><span class="badge-speedup speed-baseline">1.00x (基准)</span></td>
+            </tr>
+            <tr>
+              <td><span class="method-name">parseFloat_2_FastFloatParser_PureJava</span></td>
+              <td><strong>OpenJDK + Lemire 纯 Java 移植版</strong>：<code>JavaFloatParser.parseFloat</code></td>
+              <td class="num mono"><strong>24.019</strong></td>
+              <td class="num mono">± 0.163</td>
+              <td class="num">
+                <div class="bar-wrap">
+                  <div class="mini-bar-bg"><div class="mini-bar-fill" style="width:100%; background:var(--accent-rose)"></div></div>
+                </div>
+              </td>
+              <td class="num"><span class="badge-speedup speed-slow">0.87x</span></td>
+            </tr>
+            <tr>
+              <td><span class="method-name">parseFloat_3_FfmLemireFastFloat_CriticalHeapZeroCopy</span></td>
+              <td><strong>OpenJDK FFM (<code>critical(true)</code> 零拷贝直读 Java <code>byte[]</code>) + Lemire <code>fast_float::from_chars&lt;float&gt;</code></strong></td>
+              <td class="num mono"><strong>11.428</strong></td>
+              <td class="num mono">± 0.884</td>
+              <td class="num">
+                <div class="bar-wrap">
+                  <div class="mini-bar-bg"><div class="mini-bar-fill" style="width:47.6%; background:var(--bar-best)"></div></div>
+                </div>
+              </td>
+              <td class="num"><span class="badge-speedup speed-best">1.83x 🏆</span></td>
+            </tr>
+
+            <!-- 3. String.split -->
+            <tr class="group-start">
+              <td class="cat-cell" rowspan="4">
+                3. 纯字符串切分 (<code>String.split</code>)
+                <span class="cat-sub">切分 256 个字段 (4.4 KB)</span>
+              </td>
+              <td><span class="method-name">splitOnly_1_JdkStringSplit</span></td>
+              <td><strong>OpenJDK 标准实现</strong>：<code>csvLine.split(",")</code>（<code>ArrayList</code> 动态扩容 + 分配 256 个子 <code>String</code> 与 <code>byte[]</code>）</td>
+              <td class="num mono"><strong>1,844.395</strong></td>
+              <td class="num mono">± 44.407</td>
+              <td class="num">
+                <div class="bar-wrap">
+                  <div class="mini-bar-bg"><div class="mini-bar-fill" style="width:100%; background:var(--bar-jdk)"></div></div>
+                </div>
+              </td>
+              <td class="num"><span class="badge-speedup speed-baseline">1.00x (基准)</span></td>
+            </tr>
+            <tr>
+              <td><span class="method-name">splitOnly_2_FfmNeonSimd_ReturnExactJavaStringArray</span></td>
+              <td><strong>OpenJDK FFM + Lemire ARM64 NEON 扫描 + 构造精确 <code>String[256]</code></strong>（返回值与 <code>String.split</code> 100% 一致）</td>
+              <td class="num mono"><strong>1,370.680</strong></td>
+              <td class="num mono">± 48.478</td>
+              <td class="num">
+                <div class="bar-wrap">
+                  <div class="mini-bar-bg"><div class="mini-bar-fill" style="width:74.3%; background:var(--bar-java-lemire)"></div></div>
+                </div>
+              </td>
+              <td class="num"><span class="badge-speedup speed-fast">1.35x 🚀</span></td>
+            </tr>
+            <tr>
+              <td><span class="method-name">splitOnly_3_FfmLemireCpp20ViewsSplit_ZeroCopyOffsets</span></td>
+              <td><strong>OpenJDK FFM (<code>critical(true)</code>) + Lemire C++20 <code>std::views::split</code></strong>（零拷贝输出 256 个起止偏移）</td>
+              <td class="num mono"><strong>941.940</strong></td>
+              <td class="num mono">± 2.348</td>
+              <td class="num">
+                <div class="bar-wrap">
+                  <div class="mini-bar-bg"><div class="mini-bar-fill" style="width:51.1%; background:var(--bar-ffm)"></div></div>
+                </div>
+              </td>
+              <td class="num"><span class="badge-speedup speed-fast">1.96x 🚀</span></td>
+            </tr>
+            <tr>
+              <td><span class="method-name">splitOnly_4_FfmLemireNeonSimd_ZeroCopyOffsets</span></td>
+              <td><strong>OpenJDK FFM (<code>critical(true)</code>) + Lemire ARM64 NEON 64字节位掩码</strong>（<code>vceqq_u8</code> + <code>vshrn_n_u16</code> + <code>rbit/clz</code> 零拷贝偏移）</td>
+              <td class="num mono"><strong>143.167</strong></td>
+              <td class="num mono">± 1.436</td>
+              <td class="num">
+                <div class="bar-wrap">
+                  <div class="mini-bar-bg"><div class="mini-bar-fill" style="width:7.8%; background:var(--bar-best)"></div></div>
+                </div>
+              </td>
+              <td class="num"><span class="badge-speedup speed-best">12.88x 🏆</span></td>
+            </tr>
+
+            <!-- 4. Split + ParseDouble -->
+            <tr class="group-start">
+              <td class="cat-cell" rowspan="4">
+                4. 切分 + 解析完整流水线
+                <span class="cat-sub">256 个字段总耗时 (括号为单字段)</span>
+              </td>
+              <td><span class="method-name">splitAndParse_1_JdkSplitAndParseDouble</span></td>
+              <td><strong>OpenJDK 标准流水线</strong>：<code>csvLine.split(",")</code> + 循环调用 <code>Double.parseDouble</code></td>
+              <td class="num mono"><strong>13,280.284</strong><br><span style="font-size:0.76rem;color:var(--text-muted)">(51.88 ns/个)</span></td>
+              <td class="num mono">± 1,295.268</td>
+              <td class="num">
+                <div class="bar-wrap">
+                  <div class="mini-bar-bg"><div class="mini-bar-fill" style="width:100%; background:var(--bar-jdk)"></div></div>
+                </div>
+              </td>
+              <td class="num"><span class="badge-speedup speed-baseline">1.00x (基准)</span></td>
+            </tr>
+            <tr>
+              <td><span class="method-name">splitAndParse_2_PureJava_IndexOfAndFastDoubleParser</span></td>
+              <td><strong>OpenJDK <code>indexOf</code> 零分配游标 + Lemire 纯 Java <code>FastDoubleParser</code></strong>（不分配子 <code>String</code>）</td>
+              <td class="num mono"><strong>6,167.757</strong><br><span style="font-size:0.76rem;color:var(--text-muted)">(24.09 ns/个)</span></td>
+              <td class="num mono">± 1,243.496</td>
+              <td class="num">
+                <div class="bar-wrap">
+                  <div class="mini-bar-bg"><div class="mini-bar-fill" style="width:46.4%; background:var(--bar-java-lemire)"></div></div>
+                </div>
+              </td>
+              <td class="num"><span class="badge-speedup speed-fast">2.15x 🚀</span></td>
+            </tr>
+            <tr>
+              <td><span class="method-name">splitAndParse_3_FfmLemireCpp20ViewsSplitAndFastFloat</span></td>
+              <td><strong>OpenJDK FFM (<code>critical(true)</code>) + Lemire C++20 <code>std::views::split</code> + <code>fast_float</code></strong></td>
+              <td class="num mono"><strong>4,562.126</strong><br><span style="font-size:0.76rem;color:var(--text-muted)">(17.82 ns/个)</span></td>
+              <td class="num mono">± 691.137</td>
+              <td class="num">
+                <div class="bar-wrap">
+                  <div class="mini-bar-bg"><div class="mini-bar-fill" style="width:34.4%; background:var(--bar-ffm)"></div></div>
+                </div>
+              </td>
+              <td class="num"><span class="badge-speedup speed-fast">2.91x 🚀</span></td>
+            </tr>
+            <tr>
+              <td><span class="method-name">splitAndParse_4_FfmLemireNeonSimdSplitAndFastFloat</span></td>
+              <td><strong>OpenJDK FFM (<code>critical(true)</code>) + Lemire ARM64 NEON 64B 位掩码 + <code>fast_float</code></strong>（单次跨界直写 <code>double[]</code>）</td>
+              <td class="num mono"><strong>3,495.074</strong><br><span style="font-size:0.76rem;color:var(--text-muted)">(13.65 ns/个)</span></td>
+              <td class="num mono">± 268.152</td>
+              <td class="num">
+                <div class="bar-wrap">
+                  <div class="mini-bar-bg"><div class="mini-bar-fill" style="width:26.3%; background:var(--bar-best)"></div></div>
+                </div>
+              </td>
+              <td class="num"><span class="badge-speedup speed-best">3.80x 🏆</span></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ==================== TABLE 2: QEMU RISC-V 64 ==================== -->
+    <section class="section arch-section" id="sec-riscv64">
+      <div class="section-header">
+        <div class="section-title">
+          <span>表 2：Docker Ubuntu 26.04 + QEMU 10.2.1 <code>riscv64</code> 环境 — OpenJDK 标准库 vs. OpenJDK + Daniel Lemire 版本对比</span>
+          <span class="arch-badge arch-riscv">Docker + QEMU 10.2.1 riscv64 (-cpu max)</span>
+        </div>
+      </div>
+
+      <div class="env-meta">
+        <span class="env-pill"><strong>容器系统:</strong> Ubuntu 26.04.1 LTS (Resolute)</span>
+        <span class="env-pill"><strong>模拟器:</strong> <code>qemu-riscv64 -cpu max</code> v10.2.1 (RV64GCV + Zba/Zbb/Zbs)</span>
+        <span class="env-pill"><strong>JDK:</strong> RISC-V OpenJDK 26.0.2 (<code>LinuxRISCV64Linker</code>)</span>
+        <span class="env-pill"><strong>Native 编译器:</strong> <code>riscv64-linux-gnu-g++-15</code> (<code>-O3 -march=rv64gc_zba_zbb_zbs -mno-strict-align</code> + RVV 1.0)</span>
+      </div>
+
+      <div class="note-box amber">
+        <strong>💡 QEMU TCG 动态二进制翻译跨界说明：</strong>
+        在 QEMU 模拟器中，Java C2 JIT 代码通过 JEP 454 FFM 函数指针跳转到 C++ 共享库时，每次跨界间接跳转都会触发 QEMU <code>helper_lookup_tb_ptr</code> 翻译块哈希查找（单次固定开销约 <code>170 ~ 180 ns</code>）。因此表格最后一列同时列出了<strong>剥离 QEMU FFM 跨界跳转开销后的纯 RISC-V 算法实测耗时与真实加速比</strong>。
+      </div>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>测试场景</th>
+              <th>JMH Benchmark 方法</th>
+              <th>实现方案说明（RISC-V 64 架构）</th>
+              <th class="num">JMH 实测耗时 (<code>ns/op</code>)</th>
+              <th class="num">误差 (<code>± ns/op</code>)</th>
+              <th class="num">JMH 实测加速比</th>
+              <th class="num">剥离 QEMU FFM 跨界后纯算法耗时 &amp; 加速比</th>
+            </tr>
+          </thead>
+          <tbody>
+            <!-- 1. Double.parseDouble -->
+            <tr>
+              <td class="cat-cell" rowspan="5">
+                1. 双精度解析 (<code>double</code>)
+                <span class="cat-sub">单数字耗时 · 越小越快</span>
+              </td>
+              <td><span class="method-name">parseDouble_1_JdkStandard</span></td>
+              <td><strong>RISC-V OpenJDK 标准实现</strong>：<code>Double.parseDouble</code></td>
+              <td class="num mono"><strong>668.285</strong></td>
+              <td class="num mono">± 113.965</td>
+              <td class="num"><span class="badge-speedup speed-baseline">1.00x (基准)</span></td>
+              <td class="num mono">668.29 ns <span class="badge-speedup speed-baseline">1.00x</span></td>
+            </tr>
+            <tr>
+              <td><span class="method-name">parseDouble_2_FastDoubleParser_PureJava</span></td>
+              <td><strong>RISC-V OpenJDK + Lemire 纯 Java 移植版</strong>：C2 直接内联为 RISC-V <code>mulhu</code> 指令，无 FFM 跨界</td>
+              <td class="num mono"><strong>165.066</strong></td>
+              <td class="num mono">± 1.092</td>
+              <td class="num"><span class="badge-speedup speed-best">4.05x 🏆</span></td>
+              <td class="num mono"><strong>165.07 ns</strong> <span class="badge-speedup speed-fast">4.05x 🚀</span></td>
+            </tr>
+            <tr>
+              <td><span class="method-name">parseDouble_3_FfmLemireFastFloat_NormalOffHeap</span></td>
+              <td><strong>RISC-V OpenJDK FFM (Normal Downcall + 堆外内存) + Lemire <code>fast_float.h</code></strong></td>
+              <td class="num mono"><strong>332.264</strong></td>
+              <td class="num mono">± 233.465</td>
+              <td class="num"><span class="badge-speedup speed-fast">2.01x 🚀</span></td>
+              <td class="num mono"><strong>105.43 ns</strong> <span class="badge-speedup speed-pure">6.34x 🏆</span></td>
+            </tr>
+            <tr>
+              <td><span class="method-name">parseDouble_4_FfmLemireFastFloat_CriticalOffHeap</span></td>
+              <td><strong>RISC-V OpenJDK FFM (<code>critical(false)</code> + 堆外内存) + Lemire <code>fast_float.h</code></strong></td>
+              <td class="num mono"><strong>306.384</strong></td>
+              <td class="num mono">± 10.128</td>
+              <td class="num"><span class="badge-speedup speed-fast">2.18x 🚀</span></td>
+              <td class="num mono"><strong>105.43 ns</strong> <span class="badge-speedup speed-pure">6.34x 🏆</span></td>
+            </tr>
+            <tr>
+              <td><span class="method-name">parseDouble_5_FfmLemireFastFloat_CriticalHeapZeroCopy</span></td>
+              <td><strong>RISC-V OpenJDK FFM (<code>critical(true)</code> 零拷贝直读 Java <code>byte[]</code>) + Lemire <code>fast_float.h</code></strong>（RISC-V <code>mulhu</code> + 非对齐 <code>ld</code> SWAR）</td>
+              <td class="num mono"><strong>285.277</strong></td>
+              <td class="num mono">± 7.571</td>
+              <td class="num"><span class="badge-speedup speed-fast">2.34x 🚀</span></td>
+              <td class="num mono"><strong>105.43 ns</strong> <span class="badge-speedup speed-pure">6.34x 🏆</span></td>
+            </tr>
+
+            <!-- 2. Float.parseFloat -->
+            <tr class="group-start">
+              <td class="cat-cell" rowspan="3">
+                2. 单精度解析 (<code>float</code>)
+                <span class="cat-sub">单数字耗时 · 越小越快</span>
+              </td>
+              <td><span class="method-name">parseFloat_1_JdkStandard</span></td>
+              <td><strong>RISC-V OpenJDK 标准实现</strong>：<code>Float.parseFloat</code></td>
+              <td class="num mono"><strong>432.840</strong></td>
+              <td class="num mono">± 694.936</td>
+              <td class="num"><span class="badge-speedup speed-baseline">1.00x (基准)</span></td>
+              <td class="num mono">432.84 ns <span class="badge-speedup speed-baseline">1.00x</span></td>
+            </tr>
+            <tr>
+              <td><span class="method-name">parseFloat_2_FastFloatParser_PureJava</span></td>
+              <td><strong>RISC-V OpenJDK + Lemire 纯 Java 移植版</strong>：<code>JavaFloatParser.parseFloat</code></td>
+              <td class="num mono"><strong>537.288</strong></td>
+              <td class="num mono">± 1,042.356</td>
+              <td class="num"><span class="badge-speedup speed-slow">0.81x</span></td>
+              <td class="num mono">537.29 ns <span class="badge-speedup speed-slow">0.81x</span></td>
+            </tr>
+            <tr>
+              <td><span class="method-name">parseFloat_3_FfmLemireFastFloat_CriticalHeapZeroCopy</span></td>
+              <td><strong>RISC-V OpenJDK FFM (<code>critical(true)</code> 零拷贝直读 Java <code>byte[]</code>) + Lemire <code>fast_float::from_chars&lt;float&gt;</code></strong></td>
+              <td class="num mono"><strong>241.309</strong></td>
+              <td class="num mono">± 5.631</td>
+              <td class="num"><span class="badge-speedup speed-best">1.79x 🏆</span></td>
+              <td class="num mono"><strong>110.14 ns</strong> <span class="badge-speedup speed-pure">3.93x 🏆</span></td>
+            </tr>
+
+            <!-- 3. String.split -->
+            <tr class="group-start">
+              <td class="cat-cell" rowspan="4">
+                3. 纯字符串切分 (<code>String.split</code>)
+                <span class="cat-sub">切分 256 个字段 (4.4 KB)</span>
+              </td>
+              <td><span class="method-name">splitOnly_1_JdkStringSplit</span></td>
+              <td><strong>RISC-V OpenJDK 标准实现</strong>：<code>csvLine.split(",")</code>（返回 <code>String[256]</code>）</td>
+              <td class="num mono"><strong>88,390.773</strong></td>
+              <td class="num mono">± 6,050.650</td>
+              <td class="num"><span class="badge-speedup speed-baseline">1.00x (基准)</span></td>
+              <td class="num mono">88,390.77 ns <span class="badge-speedup speed-baseline">1.00x</span></td>
+            </tr>
+            <tr>
+              <td><span class="method-name">splitOnly_2_FfmNeonSimd_ReturnExactJavaStringArray</span></td>
+              <td><strong>RISC-V OpenJDK FFM + RVV 1.0 扫描偏移 + 构造精确 <code>String[256]</code></strong>（返回值与 <code>String.split</code> 100% 相同）</td>
+              <td class="num mono"><strong>43,634.165</strong></td>
+              <td class="num mono">± 5,103.966</td>
+              <td class="num"><span class="badge-speedup speed-fast">2.03x 🚀</span></td>
+              <td class="num mono">43,634.17 ns <span class="badge-speedup speed-fast">2.03x 🚀</span></td>
+            </tr>
+            <tr>
+              <td><span class="method-name">splitOnly_3_FfmLemireCpp20ViewsSplit_ZeroCopyOffsets</span></td>
+              <td><strong>RISC-V OpenJDK FFM (<code>critical(true)</code>) + Lemire 原版 C++20 <code>std::views::split</code></strong>（零拷贝输出 256 个偏移）</td>
+              <td class="num mono"><strong>13,573.653</strong></td>
+              <td class="num mono">± 1,837.641</td>
+              <td class="num"><span class="badge-speedup speed-fast">6.51x 🚀</span></td>
+              <td class="num mono"><strong>5,642.48 ns</strong> <span class="badge-speedup speed-pure">15.67x 🏆</span></td>
+            </tr>
+            <tr>
+              <td><span class="method-name">splitOnly_4_FfmLemireNeonSimd_ZeroCopyOffsets</span></td>
+              <td><strong>RISC-V OpenJDK FFM (<code>critical(true)</code>) + 移植版 Lemire RVV 1.0 + <code>Zbb</code> 64B 位掩码</strong>（<code>vle8.v</code> + <code>vmseq.vx</code> + <code>vsm.v</code> + <code>ctz</code>）</td>
+              <td class="num mono"><strong>11,562.403</strong></td>
+              <td class="num mono">± 4,985.517</td>
+              <td class="num"><span class="badge-speedup speed-best">7.64x 🏆</span></td>
+              <td class="num mono"><strong>11,024.79 ns</strong> <span class="badge-speedup speed-fast">8.02x 🚀</span></td>
+            </tr>
+
+            <!-- 4. Split + ParseDouble -->
+            <tr class="group-start">
+              <td class="cat-cell" rowspan="4">
+                4. 切分 + 解析完整流水线
+                <span class="cat-sub">256 个字段总耗时 (括号为单字段)</span>
+              </td>
+              <td><span class="method-name">splitAndParse_1_JdkSplitAndParseDouble</span></td>
+              <td><strong>RISC-V OpenJDK 标准流水线</strong>：<code>csvLine.split(",")</code> + 循环调用 <code>Double.parseDouble</code></td>
+              <td class="num mono"><strong>310,798.690</strong><br><span style="font-size:0.76rem;color:var(--text-muted)">(1,214.06 ns/个)</span></td>
+              <td class="num mono">± 1,602,820</td>
+              <td class="num"><span class="badge-speedup speed-baseline">1.00x (基准)</span></td>
+              <td class="num mono">310,798.69 ns <span class="badge-speedup speed-baseline">1.00x</span></td>
+            </tr>
+            <tr>
+              <td><span class="method-name">splitAndParse_2_PureJava_IndexOfAndFastDoubleParser</span></td>
+              <td><strong>RISC-V OpenJDK <code>indexOf</code> 零分配游标 + Lemire 纯 Java <code>FastDoubleParser</code></strong></td>
+              <td class="num mono"><strong>122,200.017</strong><br><span style="font-size:0.76rem;color:var(--text-muted)">(477.34 ns/个)</span></td>
+              <td class="num mono">± 13,381.802</td>
+              <td class="num"><span class="badge-speedup speed-fast">2.54x 🚀</span></td>
+              <td class="num mono">122,200.02 ns <span class="badge-speedup speed-fast">2.54x 🚀</span></td>
+            </tr>
+            <tr>
+              <td><span class="method-name">splitAndParse_3_FfmLemireCpp20ViewsSplitAndFastFloat</span></td>
+              <td><strong>RISC-V OpenJDK FFM (<code>critical(true)</code>) + Lemire C++20 <code>std::views::split</code> + <code>fast_float</code></strong></td>
+              <td class="num mono"><strong>71,488.556</strong><br><span style="font-size:0.76rem;color:var(--text-muted)">(279.25 ns/个)</span></td>
+              <td class="num mono">± 1,857.011</td>
+              <td class="num"><span class="badge-speedup speed-fast">4.35x 🚀</span></td>
+              <td class="num mono"><strong>26,454.58 ns</strong> <span class="badge-speedup speed-pure">11.75x 🏆</span></td>
+            </tr>
+            <tr>
+              <td><span class="method-name">splitAndParse_4_FfmLemireNeonSimdSplitAndFastFloat</span></td>
+              <td><strong>RISC-V OpenJDK FFM (<code>critical(true)</code>) + 移植版 Lemire RVV 1.0 位掩码 + <code>fast_float</code></strong></td>
+              <td class="num mono"><strong>70,503.619</strong><br><span style="font-size:0.76rem;color:var(--text-muted)">(275.40 ns/个)</span></td>
+              <td class="num mono">± 855.319</td>
+              <td class="num"><span class="badge-speedup speed-best">4.41x 🏆</span></td>
+              <td class="num mono"><strong>31,648.94 ns</strong> <span class="badge-speedup speed-pure">9.82x 🚀</span></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ==================== TABLE 3: CROSS-ARCH SUMMARY ==================== -->
+    <section class="section arch-section" id="sec-summary">
+      <div class="section-header">
+        <div class="section-title">
+          <span>表 3：Apple Silicon <code>arm64</code> vs. QEMU <code>riscv64</code> 核心指标横向汇总表</span>
+          <span class="arch-badge arch-cross">Cross-Architecture Summary</span>
+        </div>
+      </div>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>核心评测维度</th>
+              <th class="num">ARM64：OpenJDK 标准</th>
+              <th class="num">ARM64：OpenJDK + Lemire 最优</th>
+              <th class="num">ARM64 加速比</th>
+              <th class="num">QEMU RISC-V：OpenJDK 标准</th>
+              <th class="num">QEMU RISC-V：OpenJDK + Lemire 最优</th>
+              <th class="num">RISC-V 加速比（括号为剥离 QEMU 跨界后）</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>1. 单个 <code>double</code> 解析 (<code>parseDouble</code>)</strong></td>
+              <td class="num mono">35.74 ns</td>
+              <td class="num mono">
+                <strong>11.75 ns</strong> <span style="font-size:0.76rem;color:var(--text-muted)">(FFM critical)</span><br>
+                <strong>12.50 ns</strong> <span style="font-size:0.76rem;color:var(--text-muted)">(纯 Java)</span>
+              </td>
+              <td class="num">
+                <span class="badge-speedup speed-best">3.04x 🏆</span><br>
+                <span class="badge-speedup speed-fast" style="margin-top:4px">2.86x 🚀</span>
+              </td>
+              <td class="num mono">668.29 ns</td>
+              <td class="num mono">
+                <strong>165.07 ns</strong> <span style="font-size:0.76rem;color:var(--text-muted)">(纯 Java)</span><br>
+                <strong>285.28 ns</strong> <span style="font-size:0.76rem;color:var(--text-muted)">(FFM / 纯算法 105.43 ns)</span>
+              </td>
+              <td class="num">
+                <span class="badge-speedup speed-best">4.05x (纯 Java)</span><br>
+                <span class="badge-speedup speed-pure" style="margin-top:4px">2.34x (纯算法 6.34x 🏆)</span>
+              </td>
+            </tr>
+            <tr>
+              <td><strong>2. 单个 <code>float</code> 解析 (<code>parseFloat</code>)</strong></td>
+              <td class="num mono">20.96 ns</td>
+              <td class="num mono"><strong>11.43 ns</strong> <span style="font-size:0.76rem;color:var(--text-muted)">(FFM critical)</span></td>
+              <td class="num"><span class="badge-speedup speed-best">1.83x 🏆</span></td>
+              <td class="num mono">432.84 ns</td>
+              <td class="num mono"><strong>241.31 ns</strong> <span style="font-size:0.76rem;color:var(--text-muted)">(纯算法 110.14 ns)</span></td>
+              <td class="num"><span class="badge-speedup speed-pure">1.79x (纯算法 3.93x 🏆)</span></td>
+            </tr>
+            <tr>
+              <td><strong>3. 纯切分返回精确 <code>String[256]</code></strong></td>
+              <td class="num mono">1,844.40 ns</td>
+              <td class="num mono"><strong>1,370.68 ns</strong> <span style="font-size:0.76rem;color:var(--text-muted)">(FFM NEON + String[])</span></td>
+              <td class="num"><span class="badge-speedup speed-fast">1.35x 🚀</span></td>
+              <td class="num mono">88,390.77 ns</td>
+              <td class="num mono"><strong>43,634.17 ns</strong> <span style="font-size:0.76rem;color:var(--text-muted)">(FFM RVV + String[])</span></td>
+              <td class="num"><span class="badge-speedup speed-fast">2.03x 🚀</span></td>
+            </tr>
+            <tr>
+              <td><strong>4. 纯切分零拷贝输出 256 个偏移</strong></td>
+              <td class="num mono">1,844.40 ns</td>
+              <td class="num mono"><strong>143.17 ns</strong> <span style="font-size:0.76rem;color:var(--text-muted)">(FFM NEON 64B 掩码)</span></td>
+              <td class="num"><span class="badge-speedup speed-best">12.88x 🏆</span></td>
+              <td class="num mono">88,390.77 ns</td>
+              <td class="num mono"><strong>11,562.40 ns</strong> <span style="font-size:0.76rem;color:var(--text-muted)">(FFM RVV 64B 掩码)</span></td>
+              <td class="num"><span class="badge-speedup speed-best">7.64x (views::split 纯算法 15.67x 🏆)</span></td>
+            </tr>
+            <tr>
+              <td><strong>5. 整行切分 + 解析 256 个 <code>double</code></strong></td>
+              <td class="num mono">13,280.28 ns</td>
+              <td class="num mono">
+                <strong>3,495.07 ns</strong> <span style="font-size:0.76rem;color:var(--text-muted)">(FFM NEON + fast_float)</span><br>
+                <strong>6,167.76 ns</strong> <span style="font-size:0.76rem;color:var(--text-muted)">(纯 Java 零分配)</span>
+              </td>
+              <td class="num">
+                <span class="badge-speedup speed-best">3.80x 🏆</span><br>
+                <span class="badge-speedup speed-fast" style="margin-top:4px">2.15x 🚀</span>
+              </td>
+              <td class="num mono">310,798.69 ns</td>
+              <td class="num mono">
+                <strong>70,503.62 ns</strong> <span style="font-size:0.76rem;color:var(--text-muted)">(FFM RVV + fast_float)</span><br>
+                <strong>122,200.02 ns</strong> <span style="font-size:0.76rem;color:var(--text-muted)">(纯 Java 零分配)</span>
+              </td>
+              <td class="num">
+                <span class="badge-speedup speed-pure">4.41x (纯算法 11.75x 🏆)</span><br>
+                <span class="badge-speedup speed-fast" style="margin-top:4px">2.54x (纯 Java)</span>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Visual Bar Comparison Charts -->
+      <div class="charts-grid">
+        <div class="chart-box">
+          <h4>
+            <span>📊 Apple Silicon ARM64：整行切分 + 解析 256 个 double 耗时对比</span>
+            <span class="arch-badge arch-arm64">越短越快</span>
+          </h4>
+          <div class="chart-row">
+            <div class="chart-label-line">
+              <span>OpenJDK 标准 (<code>split(",") + Double.parseDouble</code>)</span>
+              <span class="mono"><strong>13,280.28 ns</strong> (1.00x)</span>
+            </div>
+            <div class="chart-track"><div class="chart-bar" style="width:100%; background:var(--bar-jdk)"></div></div>
+          </div>
+          <div class="chart-row">
+            <div class="chart-label-line">
+              <span>OpenJDK <code>indexOf</code> + Lemire 纯 Java <code>FastDoubleParser</code></span>
+              <span class="mono"><strong>6,167.76 ns</strong> (2.15x 🚀)</span>
+            </div>
+            <div class="chart-track"><div class="chart-bar" style="width:46.4%; background:var(--bar-java-lemire)"></div></div>
+          </div>
+          <div class="chart-row">
+            <div class="chart-label-line">
+              <span>OpenJDK FFM + Lemire C++20 <code>std::views::split</code> + <code>fast_float</code></span>
+              <span class="mono"><strong>4,562.13 ns</strong> (2.91x 🚀)</span>
+            </div>
+            <div class="chart-track"><div class="chart-bar" style="width:34.4%; background:var(--bar-ffm)"></div></div>
+          </div>
+          <div class="chart-row">
+            <div class="chart-label-line">
+              <span>OpenJDK FFM + Lemire ARM64 NEON 位掩码 + <code>fast_float</code></span>
+              <span class="mono" style="color:var(--accent-emerald)"><strong>3,495.07 ns</strong> (3.80x 🏆)</span>
+            </div>
+            <div class="chart-track"><div class="chart-bar" style="width:26.3%; background:var(--bar-best)"></div></div>
+          </div>
+        </div>
+
+        <div class="chart-box">
+          <h4>
+            <span>📊 QEMU RISC-V 64：整行切分 + 解析 256 个 double 耗时对比</span>
+            <span class="arch-badge arch-riscv">越短越快</span>
+          </h4>
+          <div class="chart-row">
+            <div class="chart-label-line">
+              <span>RISC-V OpenJDK 标准 (<code>split(",") + Double.parseDouble</code>)</span>
+              <span class="mono"><strong>310,798.69 ns</strong> (1.00x)</span>
+            </div>
+            <div class="chart-track"><div class="chart-bar" style="width:100%; background:var(--bar-jdk)"></div></div>
+          </div>
+          <div class="chart-row">
+            <div class="chart-label-line">
+              <span>RISC-V OpenJDK <code>indexOf</code> + Lemire 纯 Java <code>FastDoubleParser</code></span>
+              <span class="mono"><strong>122,200.02 ns</strong> (2.54x 🚀)</span>
+            </div>
+            <div class="chart-track"><div class="chart-bar" style="width:39.3%; background:var(--bar-java-lemire)"></div></div>
+          </div>
+          <div class="chart-row">
+            <div class="chart-label-line">
+              <span>RISC-V OpenJDK FFM + Lemire C++20 <code>views::split</code> + <code>fast_float</code></span>
+              <span class="mono"><strong>71,488.56 ns</strong> (4.35x 🚀)</span>
+            </div>
+            <div class="chart-track"><div class="chart-bar" style="width:23.0%; background:var(--bar-ffm)"></div></div>
+          </div>
+          <div class="chart-row">
+            <div class="chart-label-line">
+              <span>RISC-V OpenJDK FFM + 移植版 RVV 1.0 位掩码 + <code>fast_float</code></span>
+              <span class="mono" style="color:var(--accent-emerald)"><strong>70,503.62 ns</strong> (4.41x 🏆 / 纯算法 26,454.58 ns · 11.75x)</span>
+            </div>
+            <div class="chart-track"><div class="chart-bar" style="width:22.7%; background:var(--bar-best)"></div></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <script>
+    function toggleTheme() {
+      const root = document.documentElement;
+      const btn = document.getElementById('themeBtn');
+      if (root.getAttribute('data-theme') === 'dark') {
+        root.setAttribute('data-theme', 'light');
+        btn.textContent = '🌙 切换深色';
+      } else {
+        root.setAttribute('data-theme', 'dark');
+        btn.textContent = '☀️ 切换浅色';
+      }
+    }
+
+    function filterArch(mode, btnEl) {
+      document.querySelectorAll('.controls .btn').forEach(b => {
+        if (b.id !== 'themeBtn') b.classList.remove('active');
+      });
+      btnEl.classList.add('active');
+
+      const arm = document.getElementById('sec-arm64');
+      const rv = document.getElementById('sec-riscv64');
+      const sum = document.getElementById('sec-summary');
+
+      if (mode === 'all') {
+        arm.style.display = 'block';
+        rv.style.display = 'block';
+        sum.style.display = 'block';
+      } else if (mode === 'arm64') {
+        arm.style.display = 'block';
+        rv.style.display = 'none';
+        sum.style.display = 'none';
+      } else if (mode === 'riscv64') {
+        arm.style.display = 'none';
+        rv.style.display = 'block';
+        sum.style.display = 'none';
+      } else if (mode === 'summary') {
+        arm.style.display = 'none';
+        rv.style.display = 'none';
+        sum.style.display = 'block';
+      }
+    }
+  </script>
+</body>
+</html>

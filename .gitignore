@@ -1,0 +1,14 @@
+# Compiled classes, JMH generated sources, and native shared libraries
+build/
+
+# Downloaded JMH & FastDoubleParser JARs (automatically fetched by scripts/run_jmh_arm64.sh)
+lib/
+
+# Cloned third-party reference repositories (fast_float, FastDoubleParser, simdjson, etc.)
+upstream/
+
+# macOS & IDE metadata
+.DS_Store
+.idea/
+*.iml
+.vscode/
