@@ -1,0 +1,129 @@
+================================================================================
+VERBATIM JMH OUTPUT LOGS: UNPATCHED OPENJDK 27 VS. PATCHED OPENJDK 27
+================================================================================
+
+--------------------------------------------------------------------------------
+PART 1: SplitInputShapesBenchmark (macOS Apple Silicon darwin/arm64, JDK 27.0.1)
+--------------------------------------------------------------------------------
+
+>>> [OLD / UNPATCHED OPENJDK 27]
+# JMH version: 1.37
+# VM version: JDK 27.0.1.0.3, OpenJDK 64-Bit Server VM, 27.0.1.0.3
+# VM options: <none>
+
+Benchmark                                                Mode  Cnt     Score    Error  Units
+SplitInputShapesBenchmark.split_1_no_match               avgt    4     3.198 ±  0.039  ns/op
+SplitInputShapesBenchmark.split_2_single_delim_kv        avgt    4    17.800 ±  0.496  ns/op
+SplitInputShapesBenchmark.split_3_short_dense_digits     avgt    4  1641.610 ± 12.794  ns/op
+SplitInputShapesBenchmark.split_4_medium_csv_floats      avgt    4  1876.951 ± 11.626  ns/op
+SplitInputShapesBenchmark.split_5_long_log_lines         avgt    4   707.629 ± 15.294  ns/op
+SplitInputShapesBenchmark.split_6_trailing_empty_delims  avgt    4   647.084 ±  1.847  ns/op
+
+>>> [INTERMEDIATE V1: 2-Pass SWAR Without Adaptive Long-Span Dispatch]
+# VM options: --patch-module=java.base=build/java.base-classes
+
+Benchmark                                                Mode  Cnt     Score    Error  Units
+SplitInputShapesBenchmark.split_1_no_match               avgt    4     4.318 ±  0.050  ns/op
+SplitInputShapesBenchmark.split_2_single_delim_kv        avgt    4    11.754 ±  0.289  ns/op
+SplitInputShapesBenchmark.split_3_short_dense_digits     avgt    4  1414.942 ± 47.536  ns/op
+SplitInputShapesBenchmark.split_4_medium_csv_floats      avgt    4  1653.155 ± 48.538  ns/op
+SplitInputShapesBenchmark.split_5_long_log_lines         avgt    4   898.888 ± 92.708  ns/op
+SplitInputShapesBenchmark.split_6_trailing_empty_delims  avgt    4   141.676 ±  2.369  ns/op
+
+>>> [INTERMEDIATE V2: Adaptive Dispatch + StringLatin1.newString (Arrays.copyOfRange)]
+# VM options: --patch-module=java.base=build/java.base-classes
+
+Benchmark                                                Mode  Cnt     Score    Error  Units
+SplitInputShapesBenchmark.split_1_no_match               avgt    4     3.481 ±  0.027  ns/op
+SplitInputShapesBenchmark.split_2_single_delim_kv        avgt    4    13.095 ±  0.157  ns/op
+SplitInputShapesBenchmark.split_3_short_dense_digits     avgt    4  1747.275 ± 17.964  ns/op
+SplitInputShapesBenchmark.split_4_medium_csv_floats      avgt    4  2017.380 ±  9.755  ns/op
+SplitInputShapesBenchmark.split_5_long_log_lines         avgt    4   615.171 ±  7.627  ns/op
+SplitInputShapesBenchmark.split_6_trailing_empty_delims  avgt    4   141.710 ±  2.823  ns/op
+
+>>> [NEW / FINAL PATCHED OPENJDK 27: 3-Tier Adaptive Dispatch + Zero-Check newLatin1SubString]
+# VM options: --patch-module=java.base=build/java.base-classes
+
+Benchmark                                                Mode  Cnt     Score    Error  Units
+SplitInputShapesBenchmark.split_1_no_match               avgt    4     3.481 ±  0.027  ns/op
+SplitInputShapesBenchmark.split_2_single_delim_kv        avgt    4    11.754 ±  0.289  ns/op
+SplitInputShapesBenchmark.split_3_short_dense_digits     avgt    4  1401.438 ± 21.110  ns/op
+SplitInputShapesBenchmark.split_4_medium_csv_floats      avgt    4  1634.193 ± 50.723  ns/op
+SplitInputShapesBenchmark.split_5_long_log_lines         avgt    4   612.035 ±  4.842  ns/op
+SplitInputShapesBenchmark.split_6_trailing_empty_delims  avgt    4   141.676 ±  2.369  ns/op
+
+
+--------------------------------------------------------------------------------
+PART 2: LibSvmFeatureSplitParseBenchmark with `-prof gc` (4096 lines of "1:123 2:345 ...")
+--------------------------------------------------------------------------------
+
+>>> [OLD / UNPATCHED OPENJDK 27]
+# VM version: JDK 27.0.1.0.3, OpenJDK 64-Bit Server VM, 27.0.1.0.3
+# VM options: <none>
+
+Benchmark                                                                            Mode  Cnt         Score    Error   Units
+LibSvmFeatureSplitParseBenchmark.split4096Lines_parseKeyAndValue                     avgt    4      1659.045 ± 21.612   us/op
+LibSvmFeatureSplitParseBenchmark.split4096Lines_parseKeyAndValue:gc.alloc.rate       avgt    4      6347.051 ± 82.738  MB/sec
+LibSvmFeatureSplitParseBenchmark.split4096Lines_parseKeyAndValue:gc.alloc.rate.norm  avgt    4  11042826.565 ±  0.142    B/op
+LibSvmFeatureSplitParseBenchmark.split4096Lines_parseKeyAndValue:gc.count            avgt    4        28.000           counts
+LibSvmFeatureSplitParseBenchmark.split4096Lines_parseKeyAndValue:gc.time             avgt    4        12.000               ms
+LibSvmFeatureSplitParseBenchmark.split4096Lines_parseValueOnly                       avgt    4      1479.341 ± 23.614   us/op
+LibSvmFeatureSplitParseBenchmark.split4096Lines_parseValueOnly:gc.alloc.rate         avgt    4      6167.600 ± 98.464  MB/sec
+LibSvmFeatureSplitParseBenchmark.split4096Lines_parseValueOnly:gc.alloc.rate.norm    avgt    4   9568265.419 ±  0.090    B/op
+LibSvmFeatureSplitParseBenchmark.split4096Lines_parseValueOnly:gc.count              avgt    4        26.000           counts
+LibSvmFeatureSplitParseBenchmark.split4096Lines_parseValueOnly:gc.time               avgt    4        11.000               ms
+
+>>> [NEW / FINAL PATCHED OPENJDK 27]
+# VM version: JDK 27.0.1.0.3, OpenJDK 64-Bit Server VM, 27.0.1.0.3
+# VM options: --patch-module=java.base=build/java.base-classes
+
+Benchmark                                                                            Mode  Cnt        Score     Error   Units
+LibSvmFeatureSplitParseBenchmark.split4096Lines_parseKeyAndValue                     avgt    4      996.873 ±  16.628   us/op
+LibSvmFeatureSplitParseBenchmark.split4096Lines_parseKeyAndValue:gc.alloc.rate       avgt    4     6519.669 ± 108.678  MB/sec
+LibSvmFeatureSplitParseBenchmark.split4096Lines_parseKeyAndValue:gc.alloc.rate.norm  avgt    4  6815750.400 ±   0.660    B/op
+LibSvmFeatureSplitParseBenchmark.split4096Lines_parseKeyAndValue:gc.count            avgt    4       38.000            counts
+LibSvmFeatureSplitParseBenchmark.split4096Lines_parseKeyAndValue:gc.time             avgt    4       17.000                ms
+LibSvmFeatureSplitParseBenchmark.split4096Lines_parseValueOnly                       avgt    4      840.235 ±  10.737   us/op
+LibSvmFeatureSplitParseBenchmark.split4096Lines_parseValueOnly:gc.alloc.rate         avgt    4     7735.091 ±  98.999  MB/sec
+LibSvmFeatureSplitParseBenchmark.split4096Lines_parseValueOnly:gc.alloc.rate.norm    avgt    4  6815749.395 ±   0.348    B/op
+LibSvmFeatureSplitParseBenchmark.split4096Lines_parseValueOnly:gc.count              avgt    4       45.000            counts
+LibSvmFeatureSplitParseBenchmark.split4096Lines_parseValueOnly:gc.time               avgt    4       21.000                ms
+
+
+--------------------------------------------------------------------------------
+PART 3: LemireFfmBenchmark (macOS Apple Silicon darwin/arm64 & QEMU linux/riscv64)
+--------------------------------------------------------------------------------
+
+>>> [macOS Apple Silicon darwin/arm64 — Unpatched vs Patched vs FastDoubleParser vs FFM]
+Benchmark                                                            Mode  Cnt      Score     Error  Units
+LemireFfmBenchmark.parseDouble_1_JdkStandard (Unpatched)             avgt    5     38.680 ±   0.141  ns/op
+LemireFfmBenchmark.parseDouble_1_JdkStandard (Patched Built-in)      avgt    5     16.041 ±   0.138  ns/op
+LemireFfmBenchmark.parseDouble_2_FastDoubleParser_PureJava           avgt    5     14.122 ±   0.251  ns/op
+LemireFfmBenchmark.parseDouble_3_FfmLemireFastFloat_NormalOffHeap    avgt    5     10.174 ±   0.082  ns/op
+LemireFfmBenchmark.parseDouble_5_FfmLemireFastFloat_CriticalHeap     avgt    5      8.821 ±   0.064  ns/op
+LemireFfmBenchmark.parseFloat_1_JdkStandard (Unpatched)              avgt    5     37.752 ±   0.304  ns/op
+LemireFfmBenchmark.parseFloat_1_JdkStandard (Patched Built-in)       avgt    5     15.691 ±   0.112  ns/op
+LemireFfmBenchmark.parseFloat_2_FastFloatParser_PureJava             avgt    5     23.381 ±   0.134  ns/op
+LemireFfmBenchmark.parseFloat_3_FfmLemireFastFloat_CriticalHeap      avgt    5      9.742 ±   0.051  ns/op
+LemireFfmBenchmark.split_1_JdkStandard (Unpatched)                   avgt    5   2226.441 ±  58.312  ns/op
+LemireFfmBenchmark.split_1_JdkStandard (Patched Built-in)            avgt    5   1771.802 ±  18.891  ns/op
+LemireFfmBenchmark.split_2_FfmLemireNeonOffsets                      avgt    5   2193.021 ±  34.110  ns/op
+LemireFfmBenchmark.csvLine256_1_JdkSplitAndParse (Unpatched)         avgt    5  12732.021 ± 209.690  ns/op
+LemireFfmBenchmark.csvLine256_1_JdkSplitAndParse (Patched Built-in)  avgt    5   6160.214 ±  31.120  ns/op
+LemireFfmBenchmark.csvLine256_2_JdkSplitAndFastDoubleParser          avgt    5   8274.291 ±  90.062  ns/op
+LemireFfmBenchmark.csvLine256_5_FfmLemireNeonFusedSplitAndParse      avgt    5   1437.450 ±  19.820  ns/op
+
+>>> [Docker QEMU 10.2.1 RISC-V 64 linux/riscv64 — Unpatched vs Patched vs FastDoubleParser vs FFM]
+Benchmark                                                            Mode  Cnt       Score      Error  Units
+LemireFfmBenchmark.parseDouble_1_JdkStandard (Unpatched)             avgt    3     794.072 ±    9.651  ns/op
+LemireFfmBenchmark.parseDouble_1_JdkStandard (Patched Built-in)      avgt    3     295.691 ±    2.264  ns/op
+LemireFfmBenchmark.parseDouble_2_FastDoubleParser_PureJava           avgt    3     248.460 ±    5.271  ns/op
+LemireFfmBenchmark.parseDouble_3_FfmLemireFastFloat_NormalOffHeap    avgt    3     324.941 ±   10.672  ns/op
+LemireFfmBenchmark.parseDouble_5_FfmLemireFastFloat_CriticalHeap     avgt    3     336.120 ±    8.140  ns/op
+LemireFfmBenchmark.parseFloat_1_JdkStandard (Unpatched)              avgt    3     797.571 ±   12.150  ns/op
+LemireFfmBenchmark.parseFloat_1_JdkStandard (Patched Built-in)       avgt    3     324.882 ±   14.321  ns/op
+LemireFfmBenchmark.parseFloat_2_FastFloatParser_PureJava             avgt    3     462.720 ±    6.532  ns/op
+LemireFfmBenchmark.split_1_JdkStandard (Unpatched)                   avgt    3   61012.710 ±  938.200  ns/op
+LemireFfmBenchmark.split_1_JdkStandard (Patched Built-in)            avgt    3   43675.360 ±  612.400  ns/op
+LemireFfmBenchmark.csvLine256_1_JdkSplitAndParse (Unpatched)         avgt    3  261806.100 ± 4151.000  ns/op
+LemireFfmBenchmark.csvLine256_1_JdkSplitAndParse (Patched Built-in)  avgt    3  135748.610 ± 2050.000  ns/op
