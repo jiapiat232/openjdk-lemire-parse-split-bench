@@ -195,3 +195,41 @@ Each batch processes 4,096 lines of `"1:123 2:345 3:789 4:123 5:332 6:123 7:8888
 | **Case B: Parse Key & Value (`kv[0]` & `kv[1]`)** | `1,659.05 ± 21.61 us` | **`996.87 ± 16.63 us`** | **1.66x (-39.9% time)** | `11,042,827 B` (`11.04 MB`) | **`6,815,750 B` (`6.82 MB`)** | **-4.23 MB (-38.3%)** |
 
 > **GC Proof of Zero-Allocation `Double.parseDouble`**: Going from Case A (36,864 `parseDouble` calls) to Case B (73,728 `parseDouble` calls) adds **1,474,561 Bytes (`40.0 Bytes/call`)** in Unpatched OpenJDK 27, whereas in Patched OpenJDK 27 it adds **0 Bytes (`6,815,749 B` vs `6,815,750 B`)**!
+
+
+---
+
+## 6. Upstream Open-Source Projects, Code Provenance & References (借鉴的开源项目、论文与代码溯源清单)
+
+To make code provenance, algorithmic lineage, and open-source license compatibility 100% transparent for both human reviewers and AI agents, below is the exact mapping between every optimization in this repository and the upstream open-source projects / papers it was migrated or adapted from:
+
+### 6.1 Upstream Open-Source Repositories Referenced
+
+| # | Upstream Project / Reference | Author(s) | GitHub URL / Publication | License | What Was Migrated / Referenced |
+| :-: | :--- | :--- | :--- | :---: | :--- |
+| **1** | **`fast_float`** (`fastfloat/fast_float`) | Daniel Lemire et al. | [https://github.com/fastfloat/fast_float](https://github.com/fastfloat/fast_float) | Apache-2.0 / MIT / Boost-1.0 | <ul><li>SWAR 8-digit validation `is_made_of_eight_digits_fast` & 3-multiply parallel parsing `parse_eight_digits_unrolled` (`fast_float.h` lines 518–540) $\rightarrow$ migrated to `FloatingDecimal.isEightAsciiDigits` & `parseEightAsciiDigits`.</li><li>Single-pass 64-bit integer significand accumulation (`parse_number_string`) without intermediate digit array allocation $\rightarrow$ migrated to `FloatingDecimal.readLatin1FormatString`.</li><li>Included directly in `native/include/fast_float.h` for FFM C++ baseline comparison.</li></ul> |
+| **2** | **`FastDoubleParser`** (`wrandelshofer/FastDoubleParser`) | Werner Randelshofer & Daniel Lemire | [https://github.com/wrandelshofer/FastDoubleParser](https://github.com/wrandelshofer/FastDoubleParser) | MIT | <ul><li>Pure-Java port patterns for little-endian unaligned `long` reads (`Unsafe.getLongUnaligned` / `ByteOrder`) and Java `Math.unsignedMultiplyHigh` 128-bit mantissa arithmetic (`FastDoubleSwar` & `FastDoubleMath`).</li><li>Used as the pure-Java external library baseline in `LemireFfmBenchmark`.</li></ul> |
+| **3** | **OpenJDK `JDK-7032154` (`FloatingDecimal` / `MathUtils`)** | Raffaello Giulietti (Oracle) | [https://github.com/openjdk/jdk](https://github.com/openjdk/jdk) (`jdk.internal.math.FloatingDecimal` & `MathUtils`) | GPL-2.0 with Classpath Exception | <ul><li>Reused OpenJDK 27's built-in 128-bit power-of-10 lookup tables (`MathUtils.g1`, `MathUtils.g0`, `MathUtils.pow10`) and 128-bit interval rounding checks inside our zero-allocation `tryFastDoubleValue` & `tryFastFloatValue`, and retained `FDBigInteger` as the `< 0.04%` midpoint fallback (`slowDecimalToBinary`).</li></ul> |
+| **4** | **`simdjson` & Lemire Blog Code** (`simdjson/simdjson`, `lemire/Code-used-on-Daniel-Lemire-s-blog`) | Daniel Lemire, Geoff Langdale et al. | [https://github.com/simdjson/simdjson](https://github.com/simdjson/simdjson)<br>[https://github.com/lemire/Code-used-on-Daniel-Lemire-s-blog](https://github.com/lemire/Code-used-on-Daniel-Lemire-s-blog) | Apache-2.0 / MIT | <ul><li>Bitmask trailing-zero extraction & Kernighan bit-clearing loop (`Long.numberOfTrailingZeros(mask) >>> 3; mask &= mask - 1L`) for fast delimiter offset extraction in `String.splitLatin1DenseSwar`.</li><li>ARM64 NEON (`vceqq_u8` + `vshrn_n_u16`) and C++20 `std::views::split` reference implementations in `native/arm64/` and `native/riscv64/`.</li></ul> |
+| **5** | ***Hacker's Delight* (2nd Edition, Chapter 6-1: "Find First 0-Byte")** | Henry S. Warren, Jr. | ISBN 978-0-321-84268-8 / Public Domain | Public Domain | <ul><li>Borrow-free byte-equality bitmask formula `~(((xored & 0x7F7F...) + 0x7F7F...) \| xored \| 0x7F7F...)` used in `String.findEqualBytesSwarMask` to avoid the Mycroft `(v - 0x0101...) & ~v & 0x8080...` borrow-propagation false positive on `0x01` bytes following a `0x00` match.</li></ul> |
+
+---
+
+### 6.2 Academic Papers Referenced
+
+1. **Daniel Lemire**, *"Number Parsing at a Gigabyte per Second"*, **Software: Practice and Experience**, Vol. 51, Issue 8, pp. 1700–1727 (2021). [arXiv:2101.11408](https://arxiv.org/abs/2101.11408) — Foundation of the Eisel-Lemire 128-bit extended mantissa algorithm (`Math.unsignedMultiplyHigh`).
+2. **William D. Clinger**, *"How to Read Floating Point Numbers Accurately"*, **ACM SIGPLAN Notices (PLDI '90)**, Vol. 25, Issue 6, pp. 92–101 (1990) — Foundation of the exact IEEE 754 floating-point fast path for $\le 15$ digits and $|\exp_{10}| \le 22$, plus the hard rounding midpoint test vectors in `AccuracyVerificationSuite`.
+3. **Geoff Langdale & Daniel Lemire**, *"Parsing Gigabytes of JSON per Second"*, **The VLDB Journal**, Vol. 28, Issue 6, pp. 941–960 (2019) — Foundation of structural character bitmask indexing (`ctz` + `mask &= mask - 1`).
+
+---
+
+### 6.3 Exact Code-to-Source Attribution Map in `jdk-patch/`
+
+| File & Method in `jdk-patch/` | Provenance (Migrated vs. Original Design) | Detailed Description |
+| :--- | :--- | :--- |
+| `FloatingDecimal.isEightAsciiDigits` & `parseEightAsciiDigits` (lines 65–92) | **Migrated from `fast_float` / `FastDoubleParser`** | Direct Java translation of Daniel Lemire's 64-bit SWAR 8-digit validator and 3-multiply hierarchical decimal aggregator. |
+| `FloatingDecimal.readLatin1FormatString` (lines 1557–1984) | **Hybrid (Lemire SWAR + OpenJDK 27 scanner)** | Combines OpenJDK 27's exact Java syntax/whitespace/exponent state machine with Lemire's single-pass `long fl` accumulation and 8-digit SWAR loops before and after the decimal point. |
+| `FloatingDecimal.ASCIIToBinaryBuffer.tryFastDoubleValue` & `tryFastFloatValue` (lines 1144–1348) | **Adapted from OpenJDK 27 (`JDK-7032154`) + Lemire Zero-Alloc Architecture** | Extracts OpenJDK 27's 128-bit `Math.unsignedMultiplyHigh` interval rounding logic into a static, zero-allocation primitive fast path returning `Double.NaN` / `Float.NaN` as a sentinel on the `< 0.04%` ambiguous midpoints, deferring `byte[] d` and `ASCIIToBinaryBuffer` allocation to `slowDecimalToBinary`. |
+| `String.findEqualBytesSwarMask` (lines 3821–3825) | **Migrated from *Hacker's Delight* Ch. 6-1** | Borrow-free 8-byte parallel equality bitmask. |
+| `String.splitLatin1DenseSwar` (lines 3942–4041) | **Adapted from Lemire Bitmask Scanning + Original JDK `limit` Trimming** | Dual-word 16-byte SWAR scan + `Long.numberOfTrailingZeros` bit-clearing loop, paired with `computeTrimmedResultSize` for zero-allocation `limit == 0` trailing empty string trimming and `newLatin1SubString` zeroing elimination. |
+| `String.splitLatin1WithoutDelimiters` & `splitLatin1SparseIntrinsic` (lines 3871–3940) | **Original Design for HotSpot C2** | `@ForceInline` 0/1-delimiter fast path + zero-cost `(secondIdx >>> 1) >= 24` adaptive dispatch to single-pass `_indexOfL_char` hardware SIMD with pre-allocated `String[]`. |
